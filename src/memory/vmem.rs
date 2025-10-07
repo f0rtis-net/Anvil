@@ -8,6 +8,8 @@ pub struct BootInfoFrameAllocator {
     next: usize
 }
 
+pub static mut KERNEL_PT: Option<PhysFrame> = None;
+
 impl BootInfoFrameAllocator {
     pub unsafe fn init(memory_map: &'static MemoryMap) -> Self {
         BootInfoFrameAllocator {
@@ -35,12 +37,14 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
     }
 }
 
-unsafe fn active_level_4_table(physical_memory_offset: VirtAddr)
+pub unsafe fn active_level_4_table(physical_memory_offset: VirtAddr)
     -> &'static mut PageTable
 {
     use x86_64::registers::control::Cr3;
 
     let (level_4_table_frame, _) = Cr3::read();
+
+    KERNEL_PT = Some(level_4_table_frame);
 
     let phys = level_4_table_frame.start_address();
     let virt = physical_memory_offset + phys.as_u64();
@@ -53,49 +57,5 @@ pub unsafe fn init_vmemory(physical_memory_offset: VirtAddr) -> OffsetPageTable<
     unsafe {
         let level_4_table = active_level_4_table(physical_memory_offset);
         OffsetPageTable::new(level_4_table, physical_memory_offset)
-    }
-}
-
-pub struct Vma {
-    pub start_page: Page,
-    pub stack_addr: u64,
-    pub eip: u64,
-    pub pages_allocated: usize
-}
-
-impl Vma {
-    pub fn new(
-        start_addr: u64,
-        stack_size_in_pages: usize, 
-        code_size_in_pages: usize,
-        mapper: &mut impl Mapper<Size4KiB>,
-        frame_allocator: &mut impl FrameAllocator<Size4KiB>, 
-    ) -> Vma {
-        let start_addr = VirtAddr::new(start_addr);
-
-        let start_page: Page<Size4KiB> = Page::containing_address(start_addr);
-        let end_page: Page<Size4KiB> = start_page + (stack_size_in_pages + code_size_in_pages) as u64;
-
-        let page_range = Page::range_inclusive(start_page, end_page);
-
-        for page in page_range {
-            let phys_frame = frame_allocator.allocate_frame().unwrap();
-
-            let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
-
-            unsafe {
-                mapper.map_to(page, phys_frame, flags, frame_allocator).unwrap().flush()
-            };
-        }
-
-        let stack_page = start_page + (code_size_in_pages as u64);
-        let stack_addr = stack_page.start_address().as_u64();
-
-        Vma {
-            start_page,
-            stack_addr,
-            eip: start_addr.as_u64(),
-            pages_allocated: page_range.count()
-        }
     }
 }

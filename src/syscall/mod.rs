@@ -1,4 +1,4 @@
-use crate::{loader::SCHEDULER, println};
+use crate::{loader::SCHEDULER, print, println};
 
 pub struct SyscallUsableRegs {
     pub rax: u64, 
@@ -17,7 +17,6 @@ fn kill_task(pid: u64, exit_code: i64) {
     SCHEDULER.remove_task_from_schedule(pid as usize, exit_code);
 }
 
-
 fn get_pid(regs: *mut SyscallUsableRegs) {
     println!("called syscall: get pid");
     unsafe {
@@ -25,11 +24,26 @@ fn get_pid(regs: *mut SyscallUsableRegs) {
     }
 }
 
+unsafe fn write(regs: *mut SyscallUsableRegs) {
+    println!("called syscall write: ");
+
+    let fd = (*regs).rdi;
+    let buf = (*regs).rsi as *const u8;
+    let len = (*regs).rdx as usize;
+
+    if fd == 1 {
+        for i in 0..len {
+            let ch = *buf.add(i); 
+            print!("{}", ch as char);
+        }
+    }
+}
 pub unsafe extern "sysv64" fn syscall_handler(regs: *mut SyscallUsableRegs) {
     match (*regs).rax {
         0x27 => get_pid(regs),
         0x3c => exit_task((*regs).rdi as i64),
         0x3e => kill_task((*regs).rdi, (*regs).rsi as i64),
+        0x01 => write(regs),
         _ => panic!("Invalid syscall function number: 0x{:x}", (*regs).rax)
     }
 }

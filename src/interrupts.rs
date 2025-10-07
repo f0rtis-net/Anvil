@@ -1,4 +1,6 @@
-use core::arch::{naked_asm};
+use core::arch::{asm, naked_asm};
+use crate::bdrivers::input::ps2_kb::handle_kb_irq;
+use crate::port::end_of_interrupt;
 use crate::syscall::syscall_handler;
 use crate::{eprintln, gdt};
 use crate::loader::context_switch;
@@ -14,7 +16,7 @@ use x86_64::structures::idt::InterruptStackFrame;
 
 
 use core::mem::size_of;
-use x86_64::VirtAddr;
+use x86_64::{VirtAddr};
 
 type IDTHandler = extern "x86-interrupt" fn();
 
@@ -86,6 +88,21 @@ unsafe extern "sysv64" fn timer(_stack_frame: &mut InterruptStackFrame) {
     ", context_switch = sym context_switch);
 }
 
+macro_rules! irq_fn {
+    ($f: ident, $i: literal, $e:expr) => {
+        unsafe extern "x86-interrupt" fn $f(_stack_frame: &mut InterruptStackFrame) {
+            asm!("cli");
+            $e();
+             end_of_interrupt($i);
+            asm!("sti");
+        }
+    }
+}
+
+irq_fn!(kb_interrupt, 33, || {
+    handle_kb_irq();
+});
+
 lazy_static! {
     static ref INTERRUPT_TABLE: InterruptDescriptorTable = {
         let mut vectors = [IDTEntry::empty(); 0x100];
@@ -108,7 +125,14 @@ lazy_static! {
         idt_entry!(14, page_fault);
         idt_entry!(32, timer);
         idt_entry!(46, ide);
-        idt_entry!(0x80, syscall);
+        idt_entry!(33, kb_interrupt);
+        vectors[0x80] = IDTEntry::new(
+            syscall as *const IDTHandler,
+            CS::get_reg(),
+            0,
+            true,
+            3,
+        );
 
         InterruptDescriptorTable(vectors)
     };

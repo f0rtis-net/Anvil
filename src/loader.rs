@@ -3,50 +3,25 @@ use core::{arch::asm};
 use alloc::{collections::{btree_map::BTreeMap, vec_deque::VecDeque}};
 use lazy_static::lazy_static;
 use spin::Mutex;
-use x86_64::{structures::paging::{FrameAllocator, Mapper, Size4KiB}};
-use crate::{gdt::{kcs_sel, kds_sel}, port, println, task::{Context, Task, TaskManager, TaskPriority, TaskState}};
+use x86_64::{registers::control::Cr3, structures::paging::{FrameAllocator, Size4KiB}, VirtAddr};
+use crate::{port, println, task::{Context, Task, TaskManager, TaskPriority, TaskState}};
 
-
-#[inline(always)]
-pub fn get_context() -> *const Context {
-    let ctxp: *const Context;
-    unsafe {
-        asm!("push r15; push r14; push r13; push r12; push r11; push r10; push r9;\
-        push r8; push rdi; push rsi; push rdx; push rcx; push rbx; push rax; push rbp;\
-        mov {}, rsp; sub rsp, 0x400;",
-        out(reg) ctxp);
-    }
-    
-    ctxp
-}
+const PROG: &[u8] = include_bytes!("./main.elf");
 
 #[inline(always)]
-pub fn restore_context(ctxr: &Context) {
+pub fn force_task_context(task: &Task) {
     unsafe {
+        let (_, flags) = Cr3::read();
+        Cr3::write(task.pt_phys, flags);
+
         asm!("mov rsp, {};\
             pop rbp; pop rax; pop rbx; pop rcx; pop rdx; pop rsi; pop rdi; pop r8; pop r9;\
             pop r10; pop r11; pop r12; pop r13; pop r14; pop r15; iretq;",
-            in(reg) ctxr);
+            in(reg) &task.ctx);
     }
 }
 
-#[inline(never)]
-pub fn jmp_to_usermode(code: u64, stack_end: u64) {
-    let cs = kcs_sel();
-    let ds = kds_sel();
-    unsafe {
-        asm!("\
-            push rax   // stack segment
-            push rsi   // rsp
-            push 0x200 // rflags (only interrupt bit set)
-            push rdx   // code segment
-            push rdi   // ret to virtual addr
-            iretq",
-            in("rdi") code, in("rsi") stack_end, in("dx") cs.0, in("ax") ds.0);
-    }
-}
-
-extern "C" fn task_a()  {
+extern "C" fn task_a() {
     let mut pid: usize;
 
     unsafe {
@@ -61,19 +36,21 @@ extern "C" fn task_a()  {
 
     println!("Task processed a.");
 
-    loop {
-
-    }
-}
-
-extern "C" fn hlt_task() {
-    println!("Task processed b. Exiting by syscall (exit)");
-
     unsafe {
         asm!(
             "mov rax, 0x3c",
             "int 0x80",
         );
+    }
+}
+
+extern "C" fn hlt_task() {
+    unsafe {
+        loop {
+            asm!(
+                "hlt",
+            );
+        }
     }
 }
 
@@ -141,7 +118,6 @@ impl Scheduler {
             let mut tasks = self.tasks.lock();
             if let Some(task) = tasks.get_mut(&pid) {
                 unsafe {task.ctx = (*ctxp).clone(); }
-                task.state = TaskState::Running;
             }
         }
     }
@@ -154,11 +130,9 @@ impl Scheduler {
 
             match task.state {
                 TaskState::Running => {
-                    restore_context(&task.ctx) 
+                    force_task_context(task) 
                 }
-                TaskState::Starting => {      
-                    jmp_to_usermode(task.ctx.rip, task.ctx.rsp) 
-                }
+                
                 _ => panic!("Handled unsupported task state for trampoline")
             }
         }
@@ -196,28 +170,29 @@ lazy_static! {
     pub static ref SCHEDULER: Scheduler = Scheduler::new();
 }
 
-pub fn test_init(mapper: &mut impl Mapper<Size4KiB>, frame_allocator: &mut impl FrameAllocator<Size4KiB>) {
+pub fn test_init(frame_allocator: &mut impl FrameAllocator<Size4KiB>, phys_offset: VirtAddr) {
     let mut manager = TaskManager::new();
 
-    let idle_task = manager.create_task(
-        TaskPriority::High, 
-        hlt_task, 
-        0x100000, 
-        mapper, 
-        frame_allocator
+    let hlt = manager.create_kernel_task(
+        TaskPriority::Low, 
+        hlt_task
     );
 
-    let task1 = manager.create_task(
+    let task1 = manager.create_kernel_task(
         TaskPriority::High, 
-        task_a, 
-        0x2000000, 
-        mapper, 
-        frame_allocator
+        task_a
     );
 
-    SCHEDULER.schedule_task(idle_task);
+    let task_user = manager.create_user_task(
+        TaskPriority::High, 
+        PROG,
+        frame_allocator,
+        phys_offset
+    );
 
+    SCHEDULER.schedule_task(hlt);
     SCHEDULER.schedule_task(task1);
+    SCHEDULER.schedule_task(task_user);
 }
 
 pub unsafe extern "sysv64" fn context_switch(ctx: *const Context) {
