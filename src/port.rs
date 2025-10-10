@@ -1,6 +1,7 @@
 use crate::println;
 use core::arch::asm;
 use core::marker::PhantomData;
+use core::time::Duration;
 
 pub trait InOut {
     unsafe fn port_in(port: u16) -> Self;

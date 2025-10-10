@@ -5,7 +5,7 @@ use alloc::vec;
 use x86_64::structures::paging::PageSize;
 use x86_64::{registers::control::Cr3, structures::paging::{FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate}, VirtAddr};
 
-use crate::{gdt::{kcs_sel, kds_sel, ucs_sel, uds_sel}, memory::vmem::{active_level_4_table, KERNEL_PT}, println};
+use crate::{gdt::{kcs_sel, kds_sel, ucs_sel, uds_sel}, memory::vmem::{active_level_4_table, KERNEL_PT}};
 
 struct ProgramHeader {
     p_type: u32,
@@ -92,7 +92,7 @@ pub enum TaskState {
     Running,
     Ready,
     Zombie
-}   
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskPriority{
@@ -363,16 +363,19 @@ impl TaskManager {
             .max()
             .unwrap_or(0);
 
-        let stack_top_va = ((highest_va + Size4KiB::SIZE as u64 + (Size4KiB::SIZE as u64 - 1)) / Size4KiB::SIZE as u64) * Size4KiB::SIZE as u64;
+        let mut stack_top_va = ((highest_va + Size4KiB::SIZE as u64 + (Size4KiB::SIZE as u64 - 1)) / Size4KiB::SIZE as u64) * Size4KiB::SIZE as u64;
+
+        stack_top_va += Size4KiB::SIZE; // guard page - no need to be mapped
         let stack_pages = 1usize;
+        
         let (_, stack_end) = self.allocate_pages(
             stack_top_va,
             stack_pages,
-            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE,
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | 
+            PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE,
             &mut user_mapper,
             frame_allocator,
         );
-
 
         ctx.rsp = stack_end + Size4KiB::SIZE;
         ctx.rip = elf.entry_point.as_u64();

@@ -11,7 +11,7 @@ use core::{panic::PanicInfo};
 use bootloader::{entry_point, BootInfo};
 use x86_64::{instructions};
 
-use crate::{acpi::init_acpi, bdrivers::input::ps2_kb::init_keyboard, fs::mount_and_test, gdt::init_gdt, interrupts::setup_idt, loader::test_init, memory::initialize_memory, port::{init_pics, setup_timer_freq}};
+use crate::{acpi::init_acpi, bdrivers::input::ps2_kb::init_keyboard, fs::test, gdt::init_gdt, interrupts::setup_idt, loader::test_init, memory::initialize_memory, port::{init_pics, setup_timer_freq}};
 mod vga_buffer;
 mod interrupts;
 mod gdt;
@@ -37,6 +37,8 @@ fn kernel_start(boot_info: &'static BootInfo) -> ! {
 
     println!("Initializing acpi...");
     init_acpi(mem_result.phys_mem_offset);
+
+    test();
 
     test_init(&mut mem_result.frame_alloc,mem_result.phys_mem_offset);
 

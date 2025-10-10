@@ -8,6 +8,7 @@ use crate::{println};
 use lazy_static::lazy_static;
 
 
+use x86_64::registers::control::Cr2;
 use x86_64::registers::segmentation::Segment;
 use x86_64::registers::segmentation::CS;
 use x86_64::instructions::tables::{lidt, DescriptorTablePointer};
@@ -30,6 +31,7 @@ extern "x86-interrupt" fn breakpoint(stack_frame: &mut InterruptStackFrame) {
 
 extern "x86-interrupt" fn page_fault(stack_frame: &mut InterruptStackFrame, err_code: u64) {
     eprintln!(" !! page fault @ {:x}! err code: {} {:?}", stack_frame.instruction_pointer.as_u64(), err_code, stack_frame);
+    println!("addr: {:#x}", Cr2::read());
     loop {}
 }
 
