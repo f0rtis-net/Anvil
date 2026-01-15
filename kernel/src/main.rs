@@ -1,11 +1,14 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
+#![feature(generic_const_exprs)]
+
+extern crate alloc;
 
 use limine::BaseRevision;
-use limine::request::{FramebufferRequest, RequestsEndMarker, RequestsStartMarker};
+use limine::request::{FramebufferRequest, HhdmRequest, MemoryMapRequest, RequestsEndMarker, RequestsStartMarker};
 
-use crate::arch::{arch_init, hlt_loop};
+use crate::arch::{ArchInitInfo, arch_init, hlt_loop};
 
 mod arch;
 mod serial;
@@ -22,6 +25,15 @@ static BASE_REVISION: BaseRevision = BaseRevision::new();
 #[unsafe(link_section = ".requests")]
 static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 
+#[used]
+#[unsafe(link_section = ".requests")]
+static MEMMAP_INFO: MemoryMapRequest = MemoryMapRequest::new();
+
+#[used]
+#[unsafe(link_section = ".requests")]
+static HHDM_OFFSET: HhdmRequest = HhdmRequest::new();
+
+
 /// Define the stand and end markers for Limine requests.
 #[used]
 #[unsafe(link_section = ".requests_start_marker")]
@@ -36,12 +48,16 @@ unsafe extern "C" fn kmain() -> ! {
 
     serial_println!("Hello from rust!");
 
-    arch_init();
+    arch_init(ArchInitInfo {
+        hhdm_offset: HHDM_OFFSET.get_response().unwrap().offset(),
+        memmap_entry: MEMMAP_INFO.get_response().unwrap().entries()
+    });
 
     hlt_loop();
 }
 
 #[panic_handler]
 fn rust_panic(_info: &core::panic::PanicInfo) -> ! {
+    serial_println!("KERNEL WAS CRASHED!. Message: {:?}", _info.message());
     hlt_loop();
 }

@@ -26,32 +26,17 @@ common_stub:
     mov es, ax
     mov fs, ax
     mov gs, ax
-    mov ss, ax     
+    mov ss, ax
 
-    ; rdi = указатель на InterruptFrame (текущий RSP ДО выравнивания)
     mov rdi, rsp
-
-    ; -------- align stack for SysV ABI (16-byte) --------
-    ; SysV: перед CALL желательно иметь rsp % 16 == 8 (чтобы внутри callee после push RIP стало 0)
-    ; Мы выравниваем вниз, создаём "искусственную" 8-байтовую щель, сохраняем исходный rsp.
-    mov rax, rsp          ; save original rsp
-    and rsp, -16          ; align down to 16
-    sub rsp, 8            ; make rsp%16 == 8 before call
-    push rax              ; save original rsp on aligned stack
-    ; ----------------------------------------------------
-
     call base_trap
-
-    ; -------- restore original rsp --------
-    pop rsp
-    ; -------------------------------------
 
     pop rax
     mov ds, ax
     mov es, ax
     mov fs, ax
     mov gs, ax
-    ; mov ss, ax
+    mov ss, ax
 
     pop r15
     pop r14

@@ -47,5 +47,5 @@ macro_rules! irq {
 }
 
 isr!(3, int3, |stack| {
-    serial_println!("Custom int3 handler {}", stack);
+    serial_println!("Custom int3 handler:\n{}", stack);
 });

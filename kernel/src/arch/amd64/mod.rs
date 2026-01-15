@@ -1,15 +1,16 @@
 use x86_64::instructions;
 
-use crate::{arch::amd64::{gdt::init_gdt, interrupts::idt::init_idt, pic::{init_pics, setup_timer_freq}}, serial_println};
+use crate::{arch::{ArchInitInfo, amd64::{gdt::init_gdt, interrupts::idt::init_idt, memory::{MemoryInitInfo, init_memory_subsys}}}, serial_println};
 
 pub mod serial;
+pub mod cpu;
 mod gdt;
 mod interrupts;
-mod cpu;
 mod ports;
 mod pic;
+mod memory;
 
-pub fn init_arch() {
+pub fn init_arch(arch_info: ArchInitInfo) {
     serial_println!("Hello form amd64!");
 
     init_gdt();
@@ -18,11 +19,16 @@ pub fn init_arch() {
     init_idt();
     serial_println!("IDT Initialized!");
 
-    init_pics();
-
     instructions::interrupts::int3();
 
-    setup_timer_freq(1000);
+    serial_println!("Continue executing");
+
+    serial_println!("Hhdm offset: {:#018x}", arch_info.hhdm_offset);
+
+    init_memory_subsys(MemoryInitInfo {
+        hhdm_offset: arch_info.hhdm_offset,
+        memmap_entry: arch_info.memmap_entry
+    });
 }
 
 pub fn hlt_loop() -> ! {
