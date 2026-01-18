@@ -1,186 +1,317 @@
-use core::array;
+use crate::arch::amd64::memory::{
+    misc::floor_log2,
+    pmm::frame_area::{AreaId, FrameFlags, FramesDB, FramesDBComposite, INVALID_PFN, Pfn, frames_db},
+};
 
-use alloc::vec::Vec;
-
-use crate::arch::amd64::memory::misc::{align_down, align_up, floor_log2};
-
-pub const PAGE_SIZE: usize = 4096;
-pub const PAGE_SHIFT: usize = 12;
 const MAX_ORDER: usize = 11;
 
-type Pfn = usize;
-
-const META_UNUSED: u8 = 0xFF;
-const META_ALLOCATED: u8 = 0x00; // lower bits = order
-const META_FREE: u8 = 0x80;      // high bit = free head
-const META_ORDER_MASK: u8 = 0x7F;
-
 pub struct Buddy {
-    base_pfn: Pfn,
-    page_count: usize,
     max_order: usize,
-
-    // free lists store PFN heads
-    free: [Vec<Pfn>; MAX_ORDER + 1],
-
-    // meta indexed by pfn-local index
-    page_meta: Vec<u8>,
-
-    heap_calculated: bool
+    free: [Pfn; MAX_ORDER + 1],
+    area_id: AreaId,
 }
 
-
 impl Buddy {
-    pub fn empty() -> Self {
+    pub fn new(area_id: AreaId) -> Self {
         Self {
-            base_pfn: 0,
-            page_count: 0,
             max_order: 0,
-            free: array::from_fn(|_| Vec::new()),
-            page_meta: Vec::new(),
-            heap_calculated: false
+            free: [INVALID_PFN; MAX_ORDER + 1],
+            area_id,
         }
     }
-    
-    pub fn init(&mut self, phys_start: usize, phys_end: usize) {
-        let start = align_up(phys_start, PAGE_SIZE);
-        let end   = align_down(phys_end, PAGE_SIZE);
 
-        let pages = (end - start) / PAGE_SIZE;
+    #[inline]
+    pub fn area_id(&self) -> AreaId {
+        self.area_id
+    }
 
-        self.base_pfn = start >> PAGE_SHIFT;
-        self.page_count = pages;
+    // ---------------- locked helpers ----------------
+
+    #[inline]
+    fn base(&self, db: &FramesDBComposite) -> Pfn {
+        db.area(self.area_id).base_pfn()
+    }
+
+    #[inline]
+    fn count(&self, db: &FramesDBComposite) -> usize {
+        db.area(self.area_id).page_count()
+    }
+
+    #[inline]
+    fn in_range(&self, db: &FramesDBComposite, pfn: Pfn) -> bool {
+        db.area(self.area_id).contains(pfn)
+    }
+
+    #[inline]
+    fn pfn_to_local(&self, db: &FramesDBComposite, pfn: Pfn) -> usize {
+        pfn - self.base(db)
+    }
+
+    #[inline]
+    fn local_to_pfn(&self, db: &FramesDBComposite, local: usize) -> Pfn {
+        self.base(db) + local
+    }
+
+    #[inline]
+    fn buddy_of(&self, db: &FramesDBComposite, head: Pfn, order: usize) -> Pfn {
+        let local = self.pfn_to_local(db, head);
+        let buddy_local = local ^ (1usize << order);
+        self.local_to_pfn(db, buddy_local)
+    }
+
+    #[inline]
+    fn head_min_by_local(&self, db: &FramesDBComposite, a: Pfn, b: Pfn) -> Pfn {
+        if self.pfn_to_local(db, a) <= self.pfn_to_local(db, b) { a } else { b }
+    }
+
+    // ---------------- public API ----------------
+
+    pub fn init(&mut self) {
+        let mut guard = frames_db();
+        let db: &mut FramesDBComposite = &mut *guard;
+
+        let pages = self.count(db);
+        self.free = [INVALID_PFN; MAX_ORDER + 1];
+
+        if pages == 0 {
+            self.max_order = 0;
+            return;
+        }
+
         self.max_order = core::cmp::min(floor_log2(pages), MAX_ORDER);
 
-        self.page_meta = alloc::vec![META_UNUSED; pages];
-
-        self.free = core::array::from_fn(|_| Vec::new());
-
-        let mut idx = 0;
-        while idx < pages {
-            let remain = pages - idx;
+        let mut local = 0usize;
+        while local < pages {
+            let remain = pages - local;
             let mut order = floor_log2(remain).min(self.max_order);
 
-            while order > 0 && (idx & ((1 << order) - 1)) != 0 {
+            while order > 0 && (local & ((1usize << order) - 1)) != 0 {
                 order -= 1;
             }
 
-            self.push_free(idx, order);
-            idx += 1 << order;
-        }
-    }
+            let head = self.local_to_pfn(db, local);
+            self.push_free(db, head, order);
 
-    pub fn alloc_pfn(&mut self) -> Option<Pfn> {
-        self.alloc_order(0)
+            local += 1usize << order;
+        }
     }
 
     pub fn alloc_pfns(&mut self, order: usize) -> Option<Pfn> {
-        self.alloc_order(order)
+        let mut guard = frames_db();
+        let db: &mut FramesDBComposite = &mut *guard;
+        self.alloc_order(db, order)
     }
 
     pub fn free_pfn(&mut self, pfn: Pfn) {
-        if pfn < self.base_pfn {
-            return;
-        }
-        let idx = pfn - self.base_pfn;
-        if idx >= self.page_count {
-            return;
-        }
-        self.free_idx(idx);
+        let mut guard = frames_db();
+        let db: &mut FramesDBComposite = &mut *guard;
+
+        debug_assert!(self.in_range(db, pfn));
+
+        let f = db.area(self.area_id).frame(pfn);
+
+        debug_assert!(
+            f.flags == FrameFlags::Allocated,
+            "free_pfn: pfn {:#x} is not allocated",
+            pfn
+        );
+
+        debug_assert!(
+            (f.order as usize) <= self.max_order,
+            "free_pfn: invalid order {} for pfn {:#x}",
+            f.order,
+            pfn
+        );
+
+        self.free_block(db, pfn);
     }
 
-    fn alloc_order(&mut self, order: usize) -> Option<Pfn> {
+    // ---------------- core allocator (requires &mut db) ----------------
+
+    fn alloc_order(&mut self, db: &mut FramesDBComposite, order: usize) -> Option<Pfn> {
         if order > self.max_order {
             return None;
         }
 
         let mut cur = order;
-        while cur <= self.max_order && self.free[cur].is_empty() {
+        while cur <= self.max_order && self.free[cur] == INVALID_PFN {
             cur += 1;
         }
         if cur > self.max_order {
             return None;
         }
 
-        let idx = self.free[cur].pop().unwrap();
+        let head = self.pop_free(db, cur)?;
 
-        while cur > order {
-            cur -= 1;
-            let buddy = idx ^ (1 << cur);
-            self.push_free(buddy, cur);
+        let mut cur_order = cur;
+        while cur_order > order {
+            cur_order -= 1;
+            let buddy = self.buddy_of(db, head, cur_order);
+
+            debug_assert!(self.in_range(db, buddy));
+            self.push_free(db, buddy, cur_order);
         }
 
-        self.page_meta[idx] = META_ALLOCATED | (order as u8);
-        Some(self.base_pfn + idx)
+        // mark allocated head
+        {
+            let f = db.area_mut(self.area_id).frame_mut(head);
+            f.flags = FrameFlags::Allocated;
+            f.order = order as u8;
+            f.owner = 0;
+            f.prev_free = INVALID_PFN;
+            f.next_free = INVALID_PFN;
+        }
+
+        // mark interior pages as Unused
+        let n = 1usize << order;
+        for i in 1..n {
+            let p = head + i;
+            if !self.in_range(db, p) {
+                break;
+            }
+
+            let fi = db.area_mut(self.area_id).frame_mut(p);
+            fi.flags = FrameFlags::Unused;
+            fi.order = 0;
+            fi.owner = 0;
+            fi.prev_free = INVALID_PFN;
+            fi.next_free = INVALID_PFN;
+        }
+
+        Some(head)
     }
 
-    fn free_idx(&mut self, mut idx: usize) {
-        let meta = self.page_meta[idx];
-        if meta == META_UNUSED || (meta & META_FREE) != 0 {
-            return;
-        }
+    fn free_block(&mut self, db: &mut FramesDBComposite, mut head: Pfn) {
+        let f0 = db.area(self.area_id).frame(head);
+        let mut order = f0.order as usize;
 
-        let mut order = (meta & META_ORDER_MASK) as usize;
-        self.page_meta[idx] = META_UNUSED;
+        {
+            let f = db.area_mut(self.area_id).frame_mut(head);
+            f.flags = FrameFlags::Free;
+            f.order = order as u8;
+            f.prev_free = INVALID_PFN;
+            f.next_free = INVALID_PFN;
+        }
 
         while order < self.max_order {
-            let buddy = idx ^ (1 << order);
-            if buddy >= self.page_count {
+            let buddy = self.buddy_of(db, head, order);
+
+            if !self.in_range(db, buddy) {
+                break;
+            }
+            if !self.is_free_head(db, buddy, order) {
+                break;
+            }
+            if !self.remove_free(db, buddy, order) {
                 break;
             }
 
-            if !self.is_free_head(buddy, order) {
-                break;
-            }
-
-            self.remove_free(buddy, order);
-            self.page_meta[buddy] = META_UNUSED;
-
-            idx = idx.min(buddy);
+            head = self.head_min_by_local(db, head, buddy);
             order += 1;
+
+            let f = db.area_mut(self.area_id).frame_mut(head);
+            f.flags = FrameFlags::Free;
+            f.order = order as u8;
+            f.prev_free = INVALID_PFN;
+            f.next_free = INVALID_PFN;
         }
 
-        self.push_free(idx, order);
+        self.push_free(db, head, order);
     }
 
-    fn push_free(&mut self, idx: usize, order: usize) {
-        self.page_meta[idx] = META_FREE | (order as u8);
-        self.free[order].push(idx);
+    // ---------------- free list ops (requires &mut db) ----------------
+
+    fn is_free_head(&self, db: &FramesDBComposite, head: Pfn, order: usize) -> bool {
+        let f = db.area(self.area_id).frame(head);
+        f.flags == FrameFlags::Free && (f.order as usize == order)
     }
 
-    fn remove_free(&mut self, idx: usize, order: usize) {
-        if let Some(pos) = self.free[order].iter().position(|&x| x == idx) {
-            self.free[order].swap_remove(pos);
-        }
-    }
+    fn push_free(&mut self, db: &mut FramesDBComposite, head: Pfn, order: usize) {
+        debug_assert!(order <= self.max_order);
+        debug_assert!(self.in_range(db, head));
 
-    fn is_free_head(&self, idx: usize, order: usize) -> bool {
-        let m = self.page_meta[idx];
-        (m & META_FREE) != 0 && (m & META_ORDER_MASK) as usize == order
-    }
-}
+        let old = self.free[order];
 
-impl Buddy {
-    pub fn calculate_needed_heap(phys_start: usize, phys_end: usize) -> usize {
-        let start = align_up(phys_start, PAGE_SIZE);
-        let end   = align_down(phys_end, PAGE_SIZE);
-
-        if end <= start {
-            return 0;
+        {
+            let fh = db.area(self.area_id).frame(head);
+            debug_assert!(
+                fh.prev_free == INVALID_PFN && fh.next_free == INVALID_PFN,
+                "push_free: head {:#x} already linked (prev={:#x}, next={:#x})",
+                head, fh.prev_free, fh.next_free
+            );
         }
 
-        let pages = (end - start) / PAGE_SIZE;
+        {
+            let f = db.area_mut(self.area_id).frame_mut(head);
+            f.flags = FrameFlags::Free;
+            f.order = order as u8;
+            f.owner = 0;
+            f.prev_free = INVALID_PFN;
+            f.next_free = old;
+        }
 
-        let page_meta_bytes = pages * core::mem::size_of::<u8>();
-        let free_list_bytes = pages * core::mem::size_of::<Pfn>();
+        if old != INVALID_PFN {
+            db.area_mut(self.area_id).frame_mut(old).prev_free = head;
+        }
 
-        let overhead = 512; //overhead
+        self.free[order] = head;
+    }
 
-        page_meta_bytes + free_list_bytes + overhead
+    fn pop_free(&mut self, db: &mut FramesDBComposite, order: usize) -> Option<Pfn> {
+        let head = self.free[order];
+        if head == INVALID_PFN {
+            return None;
+        }
+
+        let next = db.area(self.area_id).frame(head).next_free;
+        self.free[order] = next;
+
+        if next != INVALID_PFN {
+            db.area_mut(self.area_id).frame_mut(next).prev_free = INVALID_PFN;
+        }
+
+        let f = db.area_mut(self.area_id).frame_mut(head);
+        f.prev_free = INVALID_PFN;
+        f.next_free = INVALID_PFN;
+
+        Some(head)
+    }
+
+    fn remove_free(&mut self, db: &mut FramesDBComposite, head: Pfn, order: usize) -> bool {
+        let f = db.area(self.area_id).frame(head);
+
+        debug_assert!(
+            f.flags == FrameFlags::Free && (f.order as usize == order),
+            "remove_free: invalid block head={:#x}",
+            head
+        );
+
+        let prev = f.prev_free;
+        let next = f.next_free;
+
+        if prev != INVALID_PFN {
+            db.area_mut(self.area_id).frame_mut(prev).next_free = next;
+        } else {
+            self.free[order] = next;
+        }
+
+        if next != INVALID_PFN {
+            db.area_mut(self.area_id).frame_mut(next).prev_free = prev;
+        }
+
+        let f = db.area_mut(self.area_id).frame_mut(head);
+        f.prev_free = INVALID_PFN;
+        f.next_free = INVALID_PFN;
+
+        true
     }
 }
 
 #[inline]
-pub fn pfn_to_physical(pfn: usize) -> usize {
-    return pfn << PAGE_SHIFT;
+pub fn pages_to_order(pages: usize) -> usize {
+    if pages <= 1 {
+        0
+    } else {
+        (usize::BITS - (pages - 1).leading_zeros()) as usize
+    }
 }

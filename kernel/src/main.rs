@@ -1,10 +1,8 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
-#![feature(generic_const_exprs)]
 
-extern crate alloc;
-
+use eclipse_framebuffer::{ScrollingTextRenderer};
 use limine::BaseRevision;
 use limine::request::{FramebufferRequest, HhdmRequest, MemoryMapRequest, RequestsEndMarker, RequestsStartMarker};
 
@@ -42,9 +40,22 @@ static _START_MARKER: RequestsStartMarker = RequestsStartMarker::new();
 #[unsafe(link_section = ".requests_end_marker")]
 static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 
+static FONT: &[u8] = include_bytes!("../external/cp850-8x16.psf");
+
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
     assert!(BASE_REVISION.is_supported());
+
+    let framebuffer = FRAMEBUFFER_REQUEST.get_response().unwrap().framebuffers().next().unwrap();
+
+    ScrollingTextRenderer::init(
+        framebuffer.addr(),
+        framebuffer.width() as usize,
+        framebuffer.height() as usize,
+        framebuffer.pitch() as usize,
+        framebuffer.bpp() as usize,
+        FONT,
+    );
 
     serial_println!("Hello from rust!");
 

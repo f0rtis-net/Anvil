@@ -2,6 +2,7 @@ use limine::memory_map::Entry;
 use crate::arch::amd64::memory::pmm::init_physical_memory;
 pub mod misc;
 mod pmm;
+mod vmm;
 
 pub struct MemoryInitInfo<'a> {
     pub hhdm_offset: u64,

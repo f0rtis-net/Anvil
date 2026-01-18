@@ -14,7 +14,7 @@ pub fn floor_log2(x: usize) -> usize {
 }
 
 #[inline]
-pub fn vit_to_phys(offset: usize, virt: usize) -> usize {
+pub fn virt_to_phys(offset: usize, virt: usize) -> usize {
     return virt - offset;
 }
 

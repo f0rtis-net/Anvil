@@ -18,6 +18,8 @@ uart_16550 = "0.4.0"
 paste = "1.0"
 acpi = "6.0.1"
 linked_list_allocator = "0.10.5"
+eclipse_framebuffer = "0.1.0"
+bitflags = "2.10.0"
 
 [dependencies.lazy_static]
 version = "1.0"

@@ -1,82 +1,97 @@
-use limine::memory_map::{Entry, EntryType};
+use core::intrinsics::write_bytes;
+use limine::memory_map::Entry;
 use spin::{Mutex, Once};
 
-use crate::{arch::amd64::memory::pmm::frame_alloc::{Buddy, pfn_to_physical}, serial_println};
+use crate::arch::amd64::memory::pmm::tests::test_pmm_all;
+use crate::arch::amd64::memory::pmm::zones_manager::{MemZonesManager, init_memory_zones};
+use crate::{
+    arch::amd64::memory::{
+        misc::{phys_to_virt, virt_to_phys},
+        pmm::{
+            frame_alloc::pages_to_order,
+            frame_area::{FRAME_SIZE, pfn_to_physical, physical_to_pfn},
+        },
+    },
+    serial_println,
+};
 
-pub mod frame_alloc;
-pub mod kheap;
+mod frame_alloc;
+mod frame_area;
+mod memblock;
+mod mem_zones;
+mod early_allocator;
+mod zones_manager;
+mod tests;
 
-static BUDDY: Once<Mutex<Buddy>> = Once::new();
+static ZONES_MANAGER: Once<Mutex<MemZonesManager>> = Once::new();
+static mut HHDM_OFFSET: usize = 0;
 
-fn find_largest_free_region<'a>(mmap: &'a[&'a Entry]) -> Option<(u64, u64)> {  
-    let mut largest_entry = None;
-    let mut largest_size = 0;
-    
-    for entry in mmap {
-        if entry.entry_type == EntryType::USABLE {
-            if entry.length > largest_size {
-                largest_size = entry.length;
-                largest_entry = Some(entry);
-            }
-        }
+bitflags::bitflags! {
+    pub struct KmallocFlags: u32 {
+        const Kernel = 1 << 0;
+        const Zeroed = 1 << 2;
     }
-    
-    largest_entry.map(|e| (e.base, e.length))
 }
 
 pub fn init_physical_memory(hhdm_offset: u64, mmap: &[&Entry]) {
+    unsafe { HHDM_OFFSET = hhdm_offset as usize; }
+
     serial_println!("Initializing physical memory manager...");
 
-    let (phys_base, region_size) =
-        find_largest_free_region(mmap)
-            .expect("No usable memory region");
+    ZONES_MANAGER.call_once(|| {
+        Mutex::new(init_memory_zones(unsafe {HHDM_OFFSET}, mmap))
+    }); 
 
-    let phys_base = phys_base as usize;
-    let region_size = region_size as usize;
-
-    let phys_end = phys_base + region_size;
-
-    let buddy_phys_start = phys_base;
-    let buddy_phys_end   = phys_end;
-
-    //rework this moment. Add optimization - buddy alloc needs for metadata found_mem - heap size. Not full mem, cuz at this way we have excess
-    let needed_heap =
-        Buddy::calculate_needed_heap(buddy_phys_start, buddy_phys_end);
-
-    serial_println!(
-        "Buddy metadata needs ~{} KiB",
-        needed_heap / 1024
-    );
-
-    let heap_phys_base = phys_base;
-    let heap_virt_base = heap_phys_base + hhdm_offset as usize;
-
-    unsafe {
-        kheap::ALLOCATOR.lock().init(
-            heap_virt_base as *mut u8,
-            needed_heap,
-        );
-    }
-
-    let buddy_data_start = heap_phys_base + needed_heap;
-
-    BUDDY.call_once(|| {
-        let mut b = Buddy::empty();
-        b.init(buddy_data_start, phys_end);
-        Mutex::new(b)
-    });
-
-    let pfn = BUDDY
-        .get()
-        .unwrap()
-        .lock()
-        .alloc_pfn()
-        .expect("Buddy alloc failed");
-
-    serial_println!(
-        "Allocated page: phys={:#018x}",
-        pfn_to_physical(pfn)
-    );
+    test_pmm_all();
 
     serial_println!("Physical memory manager initialized!");
+}
+
+pub fn kmalloc(bytes: usize, flags: KmallocFlags) -> usize {
+    if bytes == 0 {
+        return 0;
+    }
+
+    let pages = (bytes + FRAME_SIZE - 1) / FRAME_SIZE;
+    let order = pages_to_order(pages);
+
+    let start_pfn = {
+        let mut zone_manager = ZONES_MANAGER
+            .get()
+            .expect("PMM not initialized")
+            .lock();
+
+        zone_manager.get_highmem_zone()
+            .alloc_order(order)
+            .expect("kmalloc: OOM")
+    };
+
+    let phys = pfn_to_physical(start_pfn);
+    let virt = unsafe { phys_to_virt(HHDM_OFFSET, phys) };
+
+    if flags.contains(KmallocFlags::Zeroed) {
+        let alloc_bytes = (1usize << order) * FRAME_SIZE;
+        unsafe {
+            core::ptr::write_bytes(virt as *mut u8, 0, alloc_bytes);
+        }
+    }
+
+    virt
+}
+
+
+pub fn kfree(ptr: usize) {
+    if ptr == 0 {
+        return;
+    }
+
+    let phys = unsafe { virt_to_phys(HHDM_OFFSET, ptr) };
+    let pfn = physical_to_pfn(phys);
+
+    let mut mgr = ZONES_MANAGER
+        .get()
+        .expect("PMM not initialized")
+        .lock();
+
+    mgr.get_highmem_zone().free(pfn);
 }
