@@ -1,12 +1,14 @@
+use limine::memory_map::Entry;
+
 #[cfg(target_arch = "x86_64")]
 pub mod amd64;
 
 #[cfg(target_arch = "x86_64")]
 pub use amd64 as current;
-use limine::memory_map::Entry;
+
 
 pub fn hlt_loop() -> ! {
-    current::hlt_loop();
+    current::cpu::hlt_loop();
 }
 
 pub struct ArchInitInfo<'a> {

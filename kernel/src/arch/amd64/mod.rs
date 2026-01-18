@@ -31,8 +31,3 @@ pub fn init_arch(arch_info: ArchInitInfo) {
     });
 }
 
-pub fn hlt_loop() -> ! {
-    loop {
-        
-    }
-}

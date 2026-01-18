@@ -126,8 +126,6 @@ impl Buddy {
         self.free_block(db, pfn);
     }
 
-    // ---------------- core allocator (requires &mut db) ----------------
-
     fn alloc_order(&mut self, db: &mut FramesDBComposite, order: usize) -> Option<Pfn> {
         if order > self.max_order {
             return None;
@@ -218,8 +216,6 @@ impl Buddy {
 
         self.push_free(db, head, order);
     }
-
-    // ---------------- free list ops (requires &mut db) ----------------
 
     fn is_free_head(&self, db: &FramesDBComposite, head: Pfn, order: usize) -> bool {
         let f = db.area(self.area_id).frame(head);

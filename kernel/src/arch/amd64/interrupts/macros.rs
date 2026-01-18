@@ -1,5 +1,5 @@
 use paste::paste;
-use crate::{arch::amd64::{cpu::frames::InterruptFrame, hlt_loop, interrupts::{idt::{IDT_COUNT, ISR_COUNT}, tables::InterruptDescriptor}}, serial_println};
+use crate::{arch::amd64::{cpu::frames::InterruptFrame, interrupts::{idt::{IDT_COUNT, ISR_COUNT}, tables::InterruptDescriptor}}, serial_println};
 
 macro_rules! isr {
     ($vec:literal, $name:ident, |$stack:ident| $body:block) => {

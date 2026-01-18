@@ -1,4 +1,4 @@
-use crate::{arch::amd64::{cpu::frames::InterruptFrame, hlt_loop, interrupts::{idt::{IDT_COUNT, ISR_COUNT}, tables::{__irq_table_end, __irq_table_start, __isr_table_end, __isr_table_start, Handler, InterruptDescriptor}}, pic::eoi}, serial_println};
+use crate::{arch::amd64::{cpu::{frames::InterruptFrame, hlt_loop}, interrupts::{idt::{IDT_COUNT, ISR_COUNT}, tables::{__irq_table_end, __irq_table_start, __isr_table_end, __isr_table_start, Handler, InterruptDescriptor}}, pic::eoi}, serial_println};
 
 static mut HANDLERS: [Option<Handler>; IDT_COUNT] = [None; IDT_COUNT];
 
