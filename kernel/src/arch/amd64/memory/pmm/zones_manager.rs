@@ -1,5 +1,6 @@
 use core::ptr::NonNull;
 use limine::memory_map::{Entry, EntryType};
+use spin::{Mutex, MutexGuard, Once};
 
 use crate::{
     arch::amd64::memory::{
@@ -15,6 +16,15 @@ use crate::{
     },
     serial_println,
 };
+
+static ZONES_MANAGER: Once<Mutex<MemZonesManager>> = Once::new();
+#[inline]
+pub fn zones_manager() -> MutexGuard<'static, MemZonesManager> {
+    ZONES_MANAGER
+        .get()
+        .expect("FRAMES_DB not initialized")
+        .lock()
+}
 
 pub struct MemZonesManager {
     highmem: NonNull<MemoryZone>,
@@ -194,7 +204,7 @@ fn estimate_bump_bytes_after_reserve(mem: &Memblock) -> usize {
     align_up(bytes, FRAME_SIZE)
 }
 
-pub fn init_memory_zones<'a>(hhdm: usize, mmap: &'a [&'a Entry]) -> MemZonesManager {
+pub fn init_memory_zones_manager<'a>(hhdm: usize, mmap: &'a [&'a Entry]) {
     serial_println!("Initializing memory zone manager...");
 
     serial_println!("Initializing page database...");
@@ -242,9 +252,11 @@ pub fn init_memory_zones<'a>(hhdm: usize, mmap: &'a [&'a Entry]) -> MemZonesMana
         MemoryZoneType::High,
         None,
     );
-
-    let manager = MemZonesManager::init(highmem_zone, dma_zone);
     
+    ZONES_MANAGER.call_once(|| {
+        Mutex::new(MemZonesManager::init(highmem_zone, dma_zone))
+    });
+
     serial_println!("Memory zone manager initialized!");
-    manager
 }
+

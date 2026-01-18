@@ -1,4 +1,4 @@
-use crate::{arch::amd64::memory::pmm::{KmallocFlags, frame_area::FRAME_SIZE, kfree, kmalloc}, serial_println};
+use crate::{arch::amd64::memory::pmm::{abstract_allocator::{KmallocFlags, kfree, kmalloc}, frame_area::FRAME_SIZE}, serial_println};
 
 fn assert_aligned(ptr: usize) {
     assert!(
