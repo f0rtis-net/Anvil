@@ -12,6 +12,7 @@ pub fn hlt_loop() -> ! {
 }
 
 pub struct ArchInitInfo<'a> {
+    pub rsdp_addr: usize,
     pub hhdm_offset: u64,
     pub memmap_entry: &'a[&'a Entry]
 }

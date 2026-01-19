@@ -4,10 +4,9 @@ use core::{
 };
 
 use spin::Mutex;
+use x86_64::{PhysAddr, VirtAddr};
 
-use crate::arch::amd64::memory::{misc::{align_up, virt_to_phys}, pmm::{
-    HHDM_OFFSET, alloc_pages::{alloc_pages, free_pages}, frame_area::{FRAME_SIZE, FrameFlags, FramesDB, frames_db, physical_to_pfn}, mem_zones::MemoryZoneType
-}};
+use crate::{arch::amd64::memory::{misc::{align_up, phys_to_virt, virt_to_phys}, pmm::{HHDM_OFFSET, pages_allocator::{KERNEL_PAGES, SAFE_KERNEL_PAGES, alloc_pages_by_order, free_pages}, sparsemem::PAGE_SIZE, zones_manager::ZoneId}}, serial_println};
 
 const SLAB_MAGIC: u32 = 0xC0FF_EE42;
 
@@ -17,7 +16,7 @@ const MIN_OBJS_PER_SLAB: usize = 8;
 pub const SLAB_MAX_ALLOC: usize = 2048;
 
 const CLASSES: &[usize] = &[
-    8, 16, 32, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048,
+    8, 16, 32, 64, 128, 256, 512, 1024, 2048,
 ];
 
 #[repr(u8)]
@@ -27,7 +26,6 @@ enum SlabList {
     Full    = 2,
     Empty   = 3,
 }
-
 
 #[repr(C)]
 struct FreeNode {
@@ -53,7 +51,7 @@ struct SlabHeader {
 impl SlabHeader {
     #[inline]
     fn span_bytes(&self) -> usize {
-        FRAME_SIZE << (self.order as usize)
+        PAGE_SIZE << (self.order as usize)
     }
 
     #[inline]
@@ -131,7 +129,7 @@ fn count_list(mut head: *mut SlabHeader) -> usize {
 }
 
 pub struct SlabAllocator {
-    zone: MemoryZoneType,
+    zone: ZoneId,
     caches: [Cache; CLASSES.len()],
 }
 
@@ -140,7 +138,7 @@ unsafe impl Sync for SlabAllocator {}
 
 
 impl SlabAllocator {
-    pub const fn new(zone: MemoryZoneType) -> Self {
+    pub const fn new(zone: ZoneId) -> Self {
         const EMPTY: Cache = Cache::empty();
         Self {
             zone,
@@ -155,7 +153,7 @@ impl SlabAllocator {
 
             let mut order = 0usize;
             loop {
-                let span = FRAME_SIZE << order;
+                let span = PAGE_SIZE << order;
                 let usable = span.saturating_sub(mem::size_of::<SlabHeader>());
                 let n = usable / c.obj_size;
 
@@ -291,7 +289,9 @@ impl SlabAllocator {
                     list_remove(&mut (*cache).empty, victim);
 
                     (*victim).magic = 0;
-                    free_pages(victim as usize);
+                    let phys = virt_to_phys(HHDM_OFFSET, victim as usize);
+
+                    free_pages(PhysAddr::new(phys as u64));
                 }
             }
 
@@ -301,7 +301,15 @@ impl SlabAllocator {
 
     fn grow(&mut self, class_idx: usize, zeroed: bool) -> Option<*mut SlabHeader> {
         let cache = &self.caches[class_idx];
-        let span = alloc_pages(cache.order, self.zone, zeroed)?;
+
+        let zero_flag = if zeroed { SAFE_KERNEL_PAGES } else { KERNEL_PAGES };
+
+        // phys
+        let phys = alloc_pages_by_order(cache.order, zero_flag)?;
+        let phys_u = phys.as_u64() as usize;
+
+        // virt (HHDM)
+        let span = phys_to_virt(unsafe { HHDM_OFFSET }, phys_u);
 
         let slab = span as *mut SlabHeader;
 
@@ -335,7 +343,7 @@ impl SlabAllocator {
 
     fn find_slab_base(&self, ptr_u: usize) -> Option<(usize, usize)> {
         for order in 0..=MAX_SLAB_ORDER {
-            let span = FRAME_SIZE << order;
+            let span = PAGE_SIZE << order;
             let base = ptr_u & !(span - 1);
 
             let hdr = base as *const SlabHeader;
@@ -349,40 +357,31 @@ impl SlabAllocator {
     }
 }
 
-
-static SLAB: Mutex<SlabAllocator> = Mutex::new(SlabAllocator::new(MemoryZoneType::High));
+static SLAB: Mutex<SlabAllocator> = Mutex::new(SlabAllocator::new(ZoneId::High));
 
 pub fn slab_init() {
+    serial_println!("Initializing slab allocator...");
     SLAB.lock().init();
+    serial_println!("Slab allocator initialized!");
 }
 
-pub fn slab_alloc(size: usize, zeroed: bool) -> Option<usize> {
-    SLAB.lock().alloc(size, zeroed).map(|p| p.as_ptr() as usize)
+pub fn slab_alloc(size: usize, zeroed: bool) -> Option<VirtAddr> {
+    SLAB
+        .lock()
+        .alloc(size, zeroed)
+        .map(|p| VirtAddr::new(p.as_ptr() as u64))
 }
 
-pub fn slab_try_free(ptr: usize) -> bool {
-    if ptr == 0 {
-        return true;
-    }
-
-    let phys = match unsafe { virt_to_phys(HHDM_OFFSET, ptr) } {
-        p if p != 0 => p,
-        _ => return false,
-    };
-
-    let pfn = physical_to_pfn(phys);
-
-    let db = frames_db();
-    let frame = match db.find_area_id(pfn) {
-        Some(area_id) => db.area(area_id).frame(pfn),
-        None => return false,
-    };
-
-    if frame.flags == FrameFlags::Free {
+pub fn slab_try_free(ptr: VirtAddr) -> bool {
+    if ptr.as_u64() == 0 {
         return false;
     }
 
-    let nn = unsafe { NonNull::new_unchecked(ptr as *mut u8) };
+    let nn = unsafe {
+        NonNull::new_unchecked(ptr.as_u64() as usize as *mut u8)
+    };
+
     SLAB.lock().free(nn)
 }
+
 

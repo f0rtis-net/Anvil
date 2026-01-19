@@ -1,34 +1,31 @@
 use limine::memory_map::Entry;
-use crate::arch::amd64::memory::pmm::slab::slab_init;
-use crate::arch::amd64::memory::pmm::tests::test_pmm_all;
-use crate::arch::amd64::memory::pmm::zones_manager::init_memory_zones_manager;
-use crate::serial_println;
+use crate::{arch::amd64::memory::pmm::{memblock::initialize_memblock_from_mm, slab::slab_init, sparsemem::{init_sparsemem_layer}, zones_manager::init_zones_manager}};
 
-mod frame_alloc;
-mod frame_area;
 mod memblock;
-mod mem_zones;
-mod early_allocator;
+mod sparsemem;
+mod bump_alloc;
+mod pfn_iterator;
+mod buddy;
 mod zones_manager;
 mod slab;
-mod alloc_pages;
-mod tests;
-pub mod abstract_allocator;
+mod pmm_tests;
 
-static mut HHDM_OFFSET: usize = 0;
+pub mod physical_alloc;
+pub mod pages_allocator;
+
+pub static mut HHDM_OFFSET: usize = 0;
 
 pub fn init_physical_memory(hhdm_offset: u64, mmap: &[&Entry]) {
     unsafe { HHDM_OFFSET = hhdm_offset as usize; }
 
-    serial_println!("Initializing physical memory manager...");
+    let mut memblock = initialize_memblock_from_mm(mmap).unwrap();
 
-    init_memory_zones_manager(hhdm_offset as usize, mmap);
+    init_sparsemem_layer(&mut memblock);
 
-    serial_println!("Initalizing slab allocator....");
+    init_zones_manager();
+
     slab_init();
-    serial_println!("Slab allocator initialized!");
 
-    test_pmm_all();
-
-    serial_println!("Physical memory manager initialized!");
+    #[cfg(feature = "pmm_tests")]
+    pmm_tests::pmm_tests::run_all();
 }

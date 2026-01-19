@@ -26,10 +26,14 @@ version = "1.0"
 features = ["spin_no_std"]
 
 [build-dependencies]
-cc = "1.0"
+cc = "1.2.53"
 
 [[bin]]
 name = "limine-rust-template"
 path = "src/main.rs"
 test = false
 bench = false
+
+[features]
+default = ["pmm_tests"]
+pmm_tests = []

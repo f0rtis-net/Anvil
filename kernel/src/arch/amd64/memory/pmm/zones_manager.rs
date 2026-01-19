@@ -1,262 +1,259 @@
-use core::ptr::NonNull;
-use limine::memory_map::{Entry, EntryType};
-use spin::{Mutex, MutexGuard, Once};
+use spin::{Mutex, Once};
 
-use crate::{
-    arch::amd64::memory::{
-        misc::{align_up, phys_to_virt},
-        pmm::{
-            early_allocator::BumpState,
-            frame_area::{
-                AreaId, FRAME_SIZE, Frame, FramesArea, frames_db, initialize_page_database, physical_to_pfn
-            },
-            mem_zones::{MemoryZone, MemoryZoneType},
-            memblock::Memblock,
-        },
-    },
-    serial_println,
-};
+use crate::{arch::amd64::memory::{misc::human_readable_size, pmm::{buddy::Buddy, pfn_iterator::PfnRunIter, sparsemem::{FrameState, PAGE_SHIFT, PAGE_SIZE, PAGES_PER_SECTION, Pfn, SECTION_SHIFT, SparseMem, get_sparse_memory}}}, serial_println};
 
-static ZONES_MANAGER: Once<Mutex<MemZonesManager>> = Once::new();
+const MAX_ZONES: usize = 3;
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZoneId {
+    Dma = 0,
+    Normal = 1,
+    High = 2,
+}
+
+fn get_zones() -> [ZoneId; MAX_ZONES] {
+    return [ZoneId::Dma, ZoneId::High, ZoneId::Normal]
+}
+
+static ZONES_MANAGER: Once<Mutex<ZonesManager>> = Once::new();
+
 #[inline]
-pub fn zones_manager() -> MutexGuard<'static, MemZonesManager> {
+pub fn get_zones_manager() -> &'static Mutex<ZonesManager> {
     ZONES_MANAGER
         .get()
-        .expect("FRAMES_DB not initialized")
-        .lock()
+        .expect("ZonesManager not initialized")
 }
 
-pub struct MemZonesManager {
-    highmem: NonNull<MemoryZone>,
-    dma: NonNull<MemoryZone>,
+#[derive(Clone, Copy)]
+pub struct Zone {
+    id: ZoneId,
+    base_pfn: Pfn,
+    page_count: usize,
+    allocator: Buddy,
 }
 
-unsafe impl Send for MemZonesManager {}
-unsafe impl Sync for MemZonesManager {}
-
-impl MemZonesManager {
-    pub fn init(highmem_zone: NonNull<MemoryZone>, dma_zone: NonNull<MemoryZone>) -> Self {
-        Self {
-            highmem: highmem_zone,
-            dma: dma_zone,
-        }
-    }
-
-    pub fn get_highmem_zone(&mut self) -> &mut MemoryZone {
-        unsafe { self.highmem.as_mut() }
-    }
-
-    pub fn get_dma_zone(&mut self) -> &mut MemoryZone {
-        unsafe { self.dma.as_mut() }
+impl ZoneId {
+    #[inline]
+    pub const fn idx(self) -> usize {
+        self as usize
     }
 }
 
-fn init_zone_from_memblock(
-    mem: &mut Memblock,
-    bump: &mut BumpState,
-    zone_type: MemoryZoneType,
-    max_bytes: Option<usize>,
-) -> NonNull<MemoryZone> {
-    let mut zone = MemoryZone::new(zone_type);
+impl Zone {
+    pub fn new(id: ZoneId, base_pfn: Pfn, page_count: usize, allocator: Buddy) -> Self {
+        Self { id, base_pfn, page_count, allocator }
+    }
 
-    let mut used_bytes = 0usize;
-    let mut i = 0;
+    #[inline]
+    pub fn id(&self) -> ZoneId {
+        self.id
+    }
 
-    while i < mem.mem_cnt {
-        let region = mem.memory[i];
+    #[inline]
+    pub fn contains_pfn(&self, pfn: Pfn) -> bool {
+        pfn >= self.base_pfn && pfn < self.base_pfn + self.page_count
+    }
 
-        let phys_start = align_up(region.base as usize, FRAME_SIZE);
-        let phys_end = (region.base + region.size) as usize & !(FRAME_SIZE - 1);
+    pub fn alloc(&mut self, order: usize) -> Option<Pfn> {
+        self.allocator.alloc(order)
+    }
 
-        if phys_start >= phys_end {
-            i += 1;
-            continue;
-        }
+    pub fn free(&mut self, pfn: Pfn) {
+        debug_assert!(self.contains_pfn(pfn));
+        self.allocator.free(pfn);
+    }
 
-        let region_bytes = phys_end - phys_start;
+    pub fn total_pages(&self) -> usize {
+        self.page_count
+    }
 
-        if let Some(limit) = max_bytes {
-            if used_bytes >= limit {
-                break;
+    pub fn usable_pages(&self) -> usize {
+        let mut pages = 0;
+        let sparse = get_sparse_memory();
+        for run in PfnRunIter::new(sparse) {
+            let rs = run.start;
+            let re = run.start + run.len;
+
+            let zs = self.base_pfn;
+            let ze = self.base_pfn + self.page_count;
+
+            let s = core::cmp::max(rs, zs);
+            let e = core::cmp::min(re, ze);
+
+            if s < e {
+                pages += e - s;
             }
         }
 
-        let mut take_bytes = match max_bytes {
-            Some(limit) => core::cmp::min(region_bytes, limit - used_bytes),
-            None => region_bytes,
-        };
-
-        take_bytes &= !(FRAME_SIZE - 1);
-        if take_bytes == 0 {
-            i += 1;
-            continue;
-        }
-
-        mem.reserve_from_usable(phys_start as u64, take_bytes as u64, false)
-            .expect("reserve_from_usable(zone) failed");
-
-        let base_pfn = physical_to_pfn(phys_start);
-        let page_cnt = take_bytes / FRAME_SIZE;
-
-        if page_cnt == 0 {
-            i += 1;
-            continue;
-        }
-
-        let meta_bytes = page_cnt * core::mem::size_of::<Frame>();
-        let meta_ptr = bump
-            .alloc_zeroed(meta_bytes, core::mem::align_of::<Frame>())
-            .expect("OOM: frame metadata");
-
-        let mut area = FramesArea::empty();
-        area.init(
-            meta_ptr.as_ptr() as *mut Frame,
-            zone_type,
-            base_pfn,
-            page_cnt,
-        );
-
-        let area_id: AreaId = {
-            let mut db = frames_db();
-            db.add_area(area)
-        };
-
-        zone.add_area(area_id);
-
-        used_bytes += take_bytes;
+        pages
     }
 
-    zone.init();
-
-    let zone_ptr = bump
-        .alloc_zeroed(
-            core::mem::size_of::<MemoryZone>(),
-            core::mem::align_of::<MemoryZone>(),
-        )
-        .expect("OOM: MemoryZone")
-        .as_ptr() as *mut MemoryZone;
-
-    unsafe {
-        zone_ptr.write(zone);
-        NonNull::new_unchecked(zone_ptr)
+    pub fn free_pages(&self) -> usize {
+        self.allocator.free_pages_count()
     }
 }
 
-fn find_largest_free_region<'a>(mmap: &'a [&'a Entry]) -> Option<(u64, u64)> {
-    let mut largest_entry: Option<&Entry> = None;
-    let mut largest_size: u64 = 0;
+pub struct ZonesManager {
+    zones: [Option<Zone>; MAX_ZONES],
+}
 
-    for entry in mmap {
-        if entry.entry_type == EntryType::USABLE && entry.length > largest_size {
-            largest_size = entry.length;
-            largest_entry = Some(*entry);
+impl ZonesManager {
+    pub const fn new() -> Self {
+        Self {
+            zones: [None; MAX_ZONES],
         }
     }
 
-    largest_entry.map(|e| (e.base, e.length))
+    pub fn set_zone(&mut self, zone: Zone) {
+        let idx = zone.id().idx();
+        assert!(idx < MAX_ZONES);
+        assert!(self.zones[idx].is_none(), "zone {:?} already set", zone.id());
+        self.zones[idx] = Some(zone);
+    }
+
+    #[inline]
+    pub fn zone(&self, id: ZoneId) -> Option<&Zone> {
+        self.zones[id.idx()].as_ref()
+    }
+
+    #[inline]
+    pub fn zone_mut(&mut self, id: ZoneId) -> Option<&mut Zone> {
+        self.zones[id.idx()].as_mut()
+    }
+
+    pub fn alloc_pages(&mut self, id: ZoneId, order: usize) -> Option<Pfn> {
+        if let Some(z) = self.zone_mut(id) {
+            if let Some(pfn) = z.alloc(order) {
+                return Some(pfn);
+            }
+        }
+        None
+    }
+
+    pub fn free_pages(&mut self, pfn: Pfn) {
+        let f = get_sparse_memory().pfn_to_frame(pfn).expect("free_pages: pfn not present");
+        debug_assert!(f.state != FrameState::Absent, "free_pages: absent page");
+        debug_assert!(f.state != FrameState::Reserved, "free_pages: reserved page");
+
+        let zid = f.zone;
+        let z = self.zone_mut(zid).unwrap_or_else(|| panic!("free_pages: zone {:?} not initialized", zid));
+        z.free(pfn);
+    }
 }
 
-fn collect_regions<'a>(mmap: &'a [&'a Entry]) -> Memblock {
-    let mut memblock = Memblock::new();
+fn set_zone_for_run(sparse: &SparseMem, zid: ZoneId, start: Pfn, len: usize) {
+    let end = start + len;
 
-    for entry in mmap {
-        if entry.entry_type == EntryType::USABLE {
-            memblock.add_usable(entry.base, entry.length);
-        } else {
-            memblock.add_reserved(
-                entry.base,
-                entry.length,
-                matches!(entry.entry_type, EntryType::ACPI_RECLAIMABLE),
-            );
+    let mut p = start;
+    while p < end {
+        let sec = SparseMem::pfn_to_section(p);            
+        let sec_base = sec << (SECTION_SHIFT - PAGE_SHIFT);
+        let sec_end  = sec_base + PAGES_PER_SECTION;
+
+        let chunk_end = core::cmp::min(end, sec_end);
+        let off = p - sec_base;
+        let n = chunk_end - p;
+
+        let section = &sparse.sections()[sec];
+        debug_assert!(section.present);
+
+        unsafe {
+            let frames = section.frames.add(off);
+            let slice = core::slice::from_raw_parts_mut(frames, n);
+
+            for f in slice.iter_mut() {
+                if f.state == FrameState::Usable {
+                    f.zone = zid;
+                }
+            }
+        }
+
+        p = chunk_end;
+    }
+}
+
+fn make_zone(id: ZoneId, pfn_start: Pfn, pfn_end: Pfn) -> Zone {
+    let page_count = pfn_end.saturating_sub(pfn_start);
+
+    let sparse = get_sparse_memory(); 
+
+    let mut allocator = Buddy::new(pfn_start, page_count);
+    allocator.reset();
+
+    for run in PfnRunIter::new(sparse) {
+        if run.start >= pfn_end {
+            break;
+        }
+
+        let rs = run.start;
+        let re = run.start + run.len;
+
+        let start = core::cmp::max(rs, pfn_start);
+        let end   = core::cmp::min(re, pfn_end);
+
+        if start < end {
+            let len = end - start;
+
+            allocator.add_usable_run_fast(start, len);
+            
+            set_zone_for_run(sparse, id, start, len);
         }
     }
 
-    memblock
+    Zone::new(id, pfn_start, page_count, allocator)
 }
 
-fn estimate_bump_bytes_after_reserve(mem: &Memblock) -> usize {
-    let mut bytes: usize = 0;
+fn zone_manager_statistics() {
+    let zones_manager = get_zones_manager().lock();
 
-    for i in 0..mem.mem_cnt {
-        let r = mem.memory[i];
+    serial_println!("\n============ Zones Manager summary ============");
 
-        let phys_start = align_up(r.base as usize, FRAME_SIZE);
-        let phys_end = (r.base + r.size) as usize & !(FRAME_SIZE - 1);
+    for zone_id in get_zones() {
+        let zone = zones_manager.zone(zone_id);
 
-        if phys_start >= phys_end {
+        serial_println!("\n Zone: {:?}", zone_id);
+
+        if zone.is_none() {
+            serial_println!("   Uninitialized zone!\n");
             continue;
         }
 
-        let page_cnt = (phys_end - phys_start) / FRAME_SIZE;
-        if page_cnt == 0 {
-            continue;
-        }
+        let zone = zone.unwrap();
 
-        let meta = page_cnt * core::mem::size_of::<Frame>();
-        bytes = align_up(bytes, core::mem::align_of::<Frame>());
-        bytes = bytes.saturating_add(meta);
+        let zone_page_count = zone.usable_pages();
+        let zone_size = human_readable_size((zone_page_count * PAGE_SIZE) as u64);
+
+        serial_println!("   Pages count:             {}", zone_page_count);
+        serial_println!("   Zone total size:         {} {}", zone_size.value, zone_size.unit.as_str());
     }
 
-    bytes = align_up(bytes, 16);
-    bytes = bytes.saturating_add(core::mem::size_of::<MemZonesManager>());
-    bytes = bytes.saturating_add(16 * 1024);
-
-    align_up(bytes, FRAME_SIZE)
+    serial_println!("============ Zones Manager summary ============\n");
 }
 
-pub fn init_memory_zones_manager<'a>(hhdm: usize, mmap: &'a [&'a Entry]) {
-    serial_println!("Initializing memory zone manager...");
+pub fn init_zones_manager() {
+    serial_println!("Initializing zones manager...");
 
-    serial_println!("Initializing page database...");
-    initialize_page_database();
-    serial_println!("Page database initialized!");
+    let dma_limit_pfn = (16 * 1024 * 1024) >> 12;
+    let max_pfn = get_sparse_memory().max_present_pfn();
 
-    let mut collected_regions = collect_regions(mmap);
-
-    let (largest_base, largest_len) =
-        find_largest_free_region(mmap).expect("No usable memory regions");
-
-    let bump_size = estimate_bump_bytes_after_reserve(&collected_regions);
-    let bump_phys_start = align_up(largest_base as usize, FRAME_SIZE);
-
-    serial_println!("Needed for metadata: {} MiB", bump_size / 1024 / 1024);
-
-    if bump_size as u64 > largest_len {
-        panic!("Largest usable region too small for bump");
-    }
-
-    let bump_phys_end = bump_phys_start + bump_size;
-
-    collected_regions
-        .reserve_from_usable(bump_phys_start as u64, bump_size as u64, false)
-        .expect("reserve_from_usable(bump) failed");
-
-    let bump_virt_start = phys_to_virt(hhdm, bump_phys_start);
-    let bump_virt_end = phys_to_virt(hhdm, bump_phys_end);
-
-    let mut bump = BumpState::init(bump_virt_start, bump_virt_end);
-
-    serial_println!("Allocating memory for dma zone...");
-    const DMA_ZONE_SIZE: usize = 16 * 1024 * 1024;
-    let dma_zone = init_zone_from_memblock(
-        &mut collected_regions,
-        &mut bump,
-        MemoryZoneType::Dma,
-        Some(DMA_ZONE_SIZE),
+    assert!(
+        dma_limit_pfn <= max_pfn,
+        "Cannot init zones: dma_limit_pfn ({:#x}) > max_present_pfn ({:#x})",
+        dma_limit_pfn,
+        max_pfn
     );
 
-    serial_println!("Allocating memory for highmem zone...");
-    let highmem_zone = init_zone_from_memblock(
-        &mut collected_regions,
-        &mut bump,
-        MemoryZoneType::High,
-        None,
-    );
-    
-    ZONES_MANAGER.call_once(|| {
-        Mutex::new(MemZonesManager::init(highmem_zone, dma_zone))
-    });
+    //TODO: Make guarinted size zone reservation!!!!
+    let dma_zone = make_zone(ZoneId::Dma, 0, dma_limit_pfn);
+    let high_zone = make_zone(ZoneId::High, dma_limit_pfn, max_pfn);
 
-    serial_println!("Memory zone manager initialized!");
+    let mut mgr = ZonesManager::new();
+    mgr.set_zone(dma_zone);
+    mgr.set_zone(high_zone);
+
+    ZONES_MANAGER.call_once(|| Mutex::new(mgr));
+
+    zone_manager_statistics();
+
+    serial_println!(" Zones manager initialized");
 }
-
