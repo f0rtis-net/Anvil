@@ -9,7 +9,7 @@ override USER_VARIABLE = $(if $(filter $(origin $(1)),default undefined),$(eval 
 $(call USER_VARIABLE,KARCH,x86_64)
 
 # Default user QEMU flags. These are appended to the QEMU command calls.
-$(call USER_VARIABLE,QEMUFLAGS,-m 2G)
+$(call USER_VARIABLE,QEMUFLAGS,-m 4G)
 
 override IMAGE_NAME := template-$(KARCH)
 
@@ -28,7 +28,9 @@ run-hdd: run-hdd-$(KARCH)
 .PHONY: run-x86_64
 run-x86_64: 
 	qemu-system-$(KARCH) \
-		-M q35 \
+		-M q35,acpi=on,hpet=on,accel=kvm \
+		-cpu host \
+		-smp cpus=4,sockets=1,cores=4,threads=1 \
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
 		-cdrom $(IMAGE_NAME).iso \

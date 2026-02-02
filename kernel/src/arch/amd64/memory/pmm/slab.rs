@@ -1,22 +1,21 @@
 use core::{
-    mem,
-    ptr::{self, NonNull},
+    mem, ptr::{self, NonNull}
 };
 
 use spin::Mutex;
 use x86_64::{PhysAddr, VirtAddr};
 
-use crate::{arch::amd64::memory::{misc::{align_up, phys_to_virt, virt_to_phys}, pmm::{HHDM_OFFSET, pages_allocator::{KERNEL_PAGES, SAFE_KERNEL_PAGES, alloc_pages_by_order, free_pages}, sparsemem::PAGE_SIZE, zones_manager::ZoneId}}, serial_println};
+use crate::{arch::amd64::memory::{misc::{align_up, phys_to_virt, virt_to_phys}, pmm::{pages_allocator::{KERNEL_PAGES, SAFE_KERNEL_PAGES, alloc_pages_by_order, free_pages}, sparsemem::PAGE_SIZE, zones_manager::ZoneId}}, early_println};
 
 const SLAB_MAGIC: u32 = 0xC0FF_EE42;
-
 const MAX_SLAB_ORDER: usize = 4;
 const MIN_OBJS_PER_SLAB: usize = 8;
 
+pub const SLAB_MIN_ALIGN: usize = 16;
 pub const SLAB_MAX_ALLOC: usize = 2048;
 
 const CLASSES: &[usize] = &[
-    8, 16, 32, 64, 128, 256, 512, 1024, 2048,
+    8, 16, 32, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048,
 ];
 
 #[repr(u8)]
@@ -149,12 +148,14 @@ impl SlabAllocator {
     pub fn init(&mut self) {
         for (i, c) in self.caches.iter_mut().enumerate() {
             let size = CLASSES[i].max(mem::size_of::<FreeNode>());
-            c.obj_size = align_up(size, mem::align_of::<usize>());
+            c.obj_size = align_up(size, SLAB_MIN_ALIGN);
 
             let mut order = 0usize;
             loop {
                 let span = PAGE_SIZE << order;
-                let usable = span.saturating_sub(mem::size_of::<SlabHeader>());
+                let hdr_end = mem::size_of::<SlabHeader>();
+                let base_off = align_up(hdr_end, c.obj_size);
+                let usable = span.saturating_sub(base_off);
                 let n = usable / c.obj_size;
 
                 if n >= MIN_OBJS_PER_SLAB || order >= MAX_SLAB_ORDER {
@@ -235,7 +236,7 @@ impl SlabAllocator {
 
         let (slab_base, order) = match self.find_slab_base(ptr_u) {
             Some(v) => v,
-            None => return false, 
+            None => return false,
         };
 
         let slab = unsafe { &mut *(slab_base as *mut SlabHeader) };
@@ -252,33 +253,60 @@ impl SlabAllocator {
         let cache: *mut Cache = &mut self.caches[idx];
 
         unsafe {
-            let slab_ptr = slab as *mut SlabHeader;
+            let obj_size = (*cache).obj_size;
+            let span = PAGE_SIZE << (slab.order as usize);
 
+            let hdr_end = slab_base + core::mem::size_of::<SlabHeader>();
+            let obj_base = align_up(hdr_end, obj_size);
+            let slab_end = slab_base + span;
+
+            if ptr_u < obj_base || ptr_u >= slab_end {
+                return false;
+            }
+            if ((ptr_u - obj_base) % obj_size) != 0 {
+                return false;
+            }
+
+            if slab.inuse == 0 {
+                return false;
+            }
+
+            let slab_ptr = slab as *mut SlabHeader;
             let node = p.as_ptr() as *mut FreeNode;
+
+            #[cfg(debug_assertions)]
+            {
+                let mut cur = slab.free;
+                while !cur.is_null() {
+                    if cur as usize == node as usize {
+                        return false; 
+                    }
+
+                    let cu = cur as usize;
+                    if cu < obj_base || cu >= slab_end || ((cu - obj_base) % obj_size) != 0 {
+                        return false;
+                    }
+                    cur = (*cur).next;
+                }
+            }
+
             (*node).next = slab.free;
             slab.free = node;
 
             let was_full = slab.list == SlabList::Full;
             slab.inuse -= 1;
 
-            // 3. FULL → PARTIAL
             if was_full {
                 list_remove(&mut (*cache).full, slab_ptr);
-
                 slab.list = SlabList::Partial;
                 list_push(&mut (*cache).partial, slab_ptr);
             }
 
             if slab.inuse == 0 {
                 match slab.list {
-                    SlabList::Partial => {
-                        list_remove(&mut (*cache).partial, slab_ptr);
-                    }
-                    SlabList::Full => {
-                        list_remove(&mut (*cache).full, slab_ptr);
-                    }
-                    SlabList::Empty => {
-                    }
+                    SlabList::Partial => list_remove(&mut (*cache).partial, slab_ptr),
+                    SlabList::Full => list_remove(&mut (*cache).full, slab_ptr),
+                    SlabList::Empty => {}
                 }
 
                 slab.list = SlabList::Empty;
@@ -289,15 +317,15 @@ impl SlabAllocator {
                     list_remove(&mut (*cache).empty, victim);
 
                     (*victim).magic = 0;
-                    let phys = virt_to_phys(HHDM_OFFSET, victim as usize);
-
+                    let phys = virt_to_phys(victim as usize);
                     free_pages(PhysAddr::new(phys as u64));
                 }
             }
 
             true
         }
-    }   
+    }
+
 
     fn grow(&mut self, class_idx: usize, zeroed: bool) -> Option<*mut SlabHeader> {
         let cache = &self.caches[class_idx];
@@ -309,7 +337,7 @@ impl SlabAllocator {
         let phys_u = phys.as_u64() as usize;
 
         // virt (HHDM)
-        let span = phys_to_virt(unsafe { HHDM_OFFSET }, phys_u);
+        let span = phys_to_virt(phys_u);
 
         let slab = span as *mut SlabHeader;
 
@@ -326,7 +354,9 @@ impl SlabAllocator {
             (*slab).prev = ptr::null_mut();
             (*slab).next = ptr::null_mut();
 
-            let base = span + mem::size_of::<SlabHeader>();
+            let hdr_end = span + mem::size_of::<SlabHeader>();
+            let base = align_up(hdr_end, cache.obj_size);
+
             let mut head: *mut FreeNode = ptr::null_mut();
 
             for i in 0..cache.objs_per_slab {
@@ -360,9 +390,9 @@ impl SlabAllocator {
 static SLAB: Mutex<SlabAllocator> = Mutex::new(SlabAllocator::new(ZoneId::High));
 
 pub fn slab_init() {
-    serial_println!("Initializing slab allocator...");
+    early_println!("Initializing slab allocator...");
     SLAB.lock().init();
-    serial_println!("Slab allocator initialized!");
+    early_println!("Slab allocator initialized!");
 }
 
 pub fn slab_alloc(size: usize, zeroed: bool) -> Option<VirtAddr> {

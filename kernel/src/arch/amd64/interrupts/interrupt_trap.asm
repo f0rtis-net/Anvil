@@ -24,9 +24,6 @@ common_stub:
     mov ax, 0x10
     mov ds, ax
     mov es, ax
-    mov fs, ax
-    mov gs, ax
-    mov ss, ax
 
     mov rdi, rsp
     call base_trap
@@ -34,9 +31,6 @@ common_stub:
     pop rax
     mov ds, ax
     mov es, ax
-    mov fs, ax
-    mov gs, ax
-    mov ss, ax
 
     pop r15
     pop r14

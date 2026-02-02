@@ -1,78 +1,72 @@
 #![no_std]
 #![no_main]
+#![feature(cell_leak)]
 #![feature(abi_x86_interrupt)]
 
-use eclipse_framebuffer::{ScrollingTextRenderer};
-use limine::BaseRevision;
-use limine::request::{FramebufferRequest, HhdmRequest, MemoryMapRequest, RequestsEndMarker, RequestsStartMarker, RsdpRequest};
 
-use crate::arch::{ArchInitInfo, arch_init, hlt_loop};
+use crate::arch::{arch_init, hlt_loop};
+use crate::bootinfo::BootInfo;
+use crate::early_print::fb_printer::ScrollingFbTextRenderer;
+use crate::framebuffer::Framebuffer;
+extern crate alloc;
 
 mod arch;
 mod serial;
+mod selftest;
+mod cmd_args;
+mod framebuffer;
+mod early_print;
+mod bootinfo;
 
-/// Sets the base revision to the latest revision supported by the crate.
-/// See specification for further info.
-/// Be sure to mark all limine requests with #[used], otherwise they may be removed by the compiler.
-#[used]
-// The .requests section allows limine to find the requests faster and more safely.
-#[unsafe(link_section = ".requests")]
-static BASE_REVISION: BaseRevision = BaseRevision::new();
 
-#[used]
-#[unsafe(link_section = ".requests")]
-static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
-
-#[used]
-#[unsafe(link_section = ".requests")]
-static MEMMAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
-
-#[used]
-#[unsafe(link_section = ".requests")]
-static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
-
-#[used]
-#[unsafe(link_section = ".requests")]
-static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
-
-/// Define the stand and end markers for Limine requests.
-#[used]
-#[unsafe(link_section = ".requests_start_marker")]
-static _START_MARKER: RequestsStartMarker = RequestsStartMarker::new();
-#[used]
-#[unsafe(link_section = ".requests_end_marker")]
-static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
+include!(concat!(env!("OUT_DIR"), "/kernel_version.rs"));
 
 static FONT: &[u8] = include_bytes!("../external/cp850-8x16.psf");
 
+pub fn print_hello_banner() {
+    early_println!("");
+    early_println!("=================================================");
+    early_println!("  {} — experimental operating system", KERNEL_NAME);
+    early_println!("-------------------------------------------------");
+    early_println!("  Version:   {}", KERNEL_VERSION_FULL);
+    early_println!("  Git:       {} ({})", GIT_HASH, GIT_BRANCH);
+    early_println!("  Built:     unix {}", BUILD_UNIX_TIME);
+    early_println!("  Toolchain: {}", RUSTC_VERSION);
+    early_println!("  Target:    {}", TARGET_TRIPLE);
+    early_println!("=================================================");
+    early_println!("");
+}
+
+
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
-    assert!(BASE_REVISION.is_supported());
-
-    let framebuffer = FRAMEBUFFER_REQUEST.get_response().unwrap().framebuffers().next().unwrap();
-
-    ScrollingTextRenderer::init(
-        framebuffer.addr(),
-        framebuffer.width() as usize,
-        framebuffer.height() as usize,
-        framebuffer.pitch() as usize,
-        framebuffer.bpp() as usize,
-        FONT,
+    
+    BootInfo::init();
+    
+    assert!(BootInfo::get().bootloader_supported());
+    
+    Framebuffer::init(
+        BootInfo::get().framebuffer().unwrap().addr(), 
+        BootInfo::get().framebuffer().unwrap().width() as usize, 
+        BootInfo::get().framebuffer().unwrap().height() as usize, 
+        BootInfo::get().framebuffer().unwrap().pitch() as usize,
+        BootInfo::get().framebuffer().unwrap().bpp() as usize
     );
 
-    serial_println!("Hello from rust!");
+    ScrollingFbTextRenderer::init(
+        FONT,
+        Framebuffer::get_global()
+    );
     
-    arch_init(ArchInitInfo {
-        rsdp_addr: RSDP_REQUEST.get_response().unwrap().address(),
-        hhdm_offset: HHDM_REQUEST.get_response().unwrap().offset(),
-        memmap_entry: MEMMAP_REQUEST.get_response().unwrap().entries()
-    });
+    print_hello_banner();
+
+    arch_init();
 
     hlt_loop();
 }
 
 #[panic_handler]
 fn rust_panic(_info: &core::panic::PanicInfo) -> ! {
-    serial_println!("KERNEL WAS CRASHED!. Message: {:?}", _info.message());
+    early_println!("KERNEL WAS CRASHED!. Message: {:?}", _info.message());
     hlt_loop();
 }

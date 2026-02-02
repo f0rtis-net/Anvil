@@ -4,7 +4,7 @@ use core::ptr::null_mut;
 
 use spin::Once;
 
-use crate::{arch::amd64::memory::{misc::{align_up, phys_to_virt}, pmm::{HHDM_OFFSET, buddy::BuddyTag, bump_alloc::BumpState, memblock::{Memblock, MemblockError, MemblockType}, zones_manager::ZoneId}}, serial_println};
+use crate::{arch::amd64::memory::{misc::{align_up, phys_to_virt}, pmm::{buddy::BuddyTag, bump_alloc::BumpState, memblock::{Memblock, MemblockError, MemblockType}, zones_manager::ZoneId}}, early_println};
 
 pub const PAGE_SHIFT: usize = 12;
 pub const PAGE_SIZE: usize = 1 << PAGE_SHIFT;
@@ -399,10 +399,10 @@ fn reserve_for_sparsemem(
 }
 
 pub fn init_sparsemem_layer(memblock: &mut Memblock) {
-    serial_println!("Initializing sparse memory model...");
+    early_println!("Initializing sparse memory model...");
     let need_bytes = sparsemem_required_bytes(memblock);
 
-    serial_println!("Reserving {} MiB for sparse metadata...", need_bytes / 1024 / 1024);
+    early_println!("Reserving {} MiB for sparse metadata...", need_bytes / 1024 / 1024);
 
     let (region_base, region_size) =
         find_largest_usable_region(memblock)
@@ -419,8 +419,8 @@ pub fn init_sparsemem_layer(memblock: &mut Memblock) {
     reserve_for_sparsemem(memblock, bump_start as u64, need_bytes as u64)
         .expect("Failed to reserve sparsemem region");
 
-    let bump_virt_start = phys_to_virt(unsafe { HHDM_OFFSET }, bump_start);
-    let bump_virt_end = phys_to_virt(unsafe { HHDM_OFFSET }, bump_end as usize);
+    let bump_virt_start = phys_to_virt(bump_start);
+    let bump_virt_end = phys_to_virt(bump_end as usize);
 
     let mut bump = BumpState::init(
         bump_virt_start,
@@ -435,5 +435,5 @@ pub fn init_sparsemem_layer(memblock: &mut Memblock) {
         sparse
     });
 
-    serial_println!("Sparse memory model initialized!");
+    early_println!("Sparse memory model initialized!");
 }

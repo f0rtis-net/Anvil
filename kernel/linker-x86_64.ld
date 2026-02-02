@@ -12,6 +12,7 @@ PHDRS
     text    PT_LOAD;
     rodata  PT_LOAD;
     data    PT_LOAD;
+    percpu  PT_DYNAMIC FLAGS((1 << 1) | (1 << 2)) ; /* Write + Read */
 }
 
 SECTIONS
@@ -53,6 +54,23 @@ SECTIONS
         KEEP(*(.requests))
         KEEP(*(.requests_end_marker))
     } :data
+
+    _percpu_load = LOADADDR(.percpu);
+
+    .percpu ALIGN(64) : AT(ADDR(.percpu))  
+    {
+        _percpu_start = .;
+
+        KEEP(*(.percpu.data))
+        _percpu_data_end = .;
+
+        KEEP(*(.percpu.bss))
+        _percpu_end = .;
+
+        . = ALIGN(64);
+    } :percpu
+
+    _percpu_vma_base = _percpu_start;
 
     /* NOTE: .bss needs to be the last thing mapped to :data, otherwise lots of */
     /* unnecessary zeros will be written to the binary. */

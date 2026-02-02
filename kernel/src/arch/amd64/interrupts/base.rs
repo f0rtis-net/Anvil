@@ -1,4 +1,4 @@
-use crate::{arch::amd64::{cpu::{frames::InterruptFrame, hlt_loop}, interrupts::{idt::{IDT_COUNT, ISR_COUNT}, tables::{__irq_table_end, __irq_table_start, __isr_table_end, __isr_table_start, Handler, InterruptDescriptor}}, pic::eoi}, serial_println};
+use crate::{arch::amd64::{cpu::{frames::InterruptFrame, hlt_loop}, interrupts::{idt::{IDT_COUNT, ISR_COUNT}, tables::{__irq_table_end, __irq_table_start, __isr_table_end, __isr_table_start, Handler, InterruptDescriptor}}}, early_println};
 
 static mut HANDLERS: [Option<Handler>; IDT_COUNT] = [None; IDT_COUNT];
 
@@ -33,10 +33,11 @@ extern "C" fn base_trap(stack_frame: *const InterruptFrame) {
     } 
 
     if (frame.interrupt as usize) < ISR_COUNT {
-        serial_println!("Unhandled isr interrupt!\n {}", frame);
+        early_println!("Unhandled isr interrupt!\n {}", frame);
         hlt_loop();
     }
 
-    serial_println!("Unhandled irq interrupt!\n {}", frame);
-    eoi(((frame.interrupt as usize) + ISR_COUNT) as u8);
+    early_println!("Unhandled irq interrupt!\n {}", frame);
+    hlt_loop();
+    //eoi(((frame.interrupt as usize) + ISR_COUNT) as u8);
 }

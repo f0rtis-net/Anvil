@@ -2,7 +2,7 @@
 
 use limine::memory_map::{Entry, EntryType};
 
-use crate::{arch::amd64::memory::misc::human_readable_size, serial_println};
+use crate::{arch::amd64::memory::misc::human_readable_size, early_println};
 
 pub const MAX_MEMBLOCK_REGIONS: usize = 64;
 
@@ -344,37 +344,37 @@ fn memblock_statistics(memblock: &Memblock) {
 
     let usable_size = human_readable_size(stats.usable_bytes);
 
-    serial_println!("\n============ Memblock summary ============");
-    serial_println!("Usable regions count:          {}", stats.usable_regions);
-    serial_println!(
+    early_println!("\n============ Memblock summary ============");
+    early_println!("Usable regions count:          {}", stats.usable_regions);
+    early_println!(
         "Usable memory total:           {} {}",
         usable_size.value,
         usable_size.unit.as_str()
     );
 
     if let (Some(lo), Some(hi)) = (stats.usable_min_addr, stats.usable_max_addr) {
-        serial_println!(
+        early_println!(
             "Usable physical address range: [{:#x} .. {:#x})",
             lo,
             hi
         );
     }
 
-    serial_println!("-----------------------------------------");
-    serial_println!("Memory passed to PMM:");
-    serial_println!("  Regions count: {}", stats.usable_regions);
-    serial_println!(
+    early_println!("-----------------------------------------");
+    early_println!("Memory passed to PMM:");
+    early_println!("  Regions count: {}", stats.usable_regions);
+    early_println!(
         "  Total size:    {} {}",
         usable_size.value,
         usable_size.unit.as_str()
     );
 
-    serial_println!("============ Memblock summary ============\n");
+    early_println!("============ Memblock summary ============\n");
 }
 
 
 pub fn initialize_memblock_from_mm<'a>(mmap: &'a[&'a Entry]) -> Result<Memblock, MemblockError> {
-    serial_println!("Initializing memblock manager...");
+    early_println!("Initializing memblock manager...");
 
     let mut memblock = Memblock::new();
 
@@ -388,7 +388,7 @@ pub fn initialize_memblock_from_mm<'a>(mmap: &'a[&'a Entry]) -> Result<Memblock,
 
     memblock_statistics(&memblock);
 
-    serial_println!("Memblock manager initialized!");
+    early_println!("Memblock manager initialized!");
 
     Ok(memblock)
 }

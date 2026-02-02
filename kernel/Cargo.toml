@@ -1,7 +1,13 @@
 [package]
-name = "limine-rust-template"
+name = "AnvilOs"
 version = "0.1.0"
 edition = "2024"
+
+[package.metadata.kernel]
+version_major = 0
+version_minor = 1
+version_patch = 0
+version_suffix = "-alpha"
 
 [profile.dev]
 panic = "abort"
@@ -18,8 +24,10 @@ uart_16550 = "0.4.0"
 paste = "1.0"
 acpi = "6.0.1"
 linked_list_allocator = "0.10.5"
-eclipse_framebuffer = "0.1.0"
 bitflags = "2.10.0"
+raw-cpuid = "11.6.0"
+elf = {version = "0.8.0",  default-features = false}
+
 
 [dependencies.lazy_static]
 version = "1.0"
@@ -35,5 +43,6 @@ test = false
 bench = false
 
 [features]
-default = ["pmm_tests"]
+default = ["pmm_tests", "vmm_tests"]
 pmm_tests = []
+vmm_tests = []

@@ -1,30 +1,63 @@
-use crate::{arch::{ArchInitInfo, amd64::{gdt::init_gdt, interrupts::idt::init_idt, memory::{MemoryInitInfo, init_memory_subsys}}}, serial_println};
+use x86_64::instructions;
+
+use crate::{arch::amd64::{acpi::init_acpi, apic::init_bootstrap_lapic, cpu::{cpuid::get_cpuid_full, smp::startup::smp_startup}, gdt::init_bootstrap_gdt, interrupts::idt::init_idt, memory::{MemoryInitInfo, init_memory_subsys}, scheduler::{init_sheduler_for_percpu, start_scheduler}, timer::initialize_hpet}, bootinfo::BootInfo, early_println};
 
 pub mod serial;
 pub mod cpu;
 mod gdt;
 mod interrupts;
 mod ports;
-mod pic;
 mod memory;
+mod acpi;
+mod apic;
+mod timer;
+mod scheduler
+;
+fn early_startup() {
+    instructions::interrupts::disable();
 
+    early_println!("Initializing GDT...");
+    init_bootstrap_gdt();
+    early_println!("GDT initialized!");
 
-pub fn init_arch(arch_info: ArchInitInfo) {
-    serial_println!("Initializing amd64 arch...");
-
-    serial_println!("Initializing GDT...");
-    init_gdt();
-    serial_println!("GDT initialized!");
-
-    serial_println!("Initializing IDT...");
+    early_println!("Initializing IDT...");
     init_idt();
-    serial_println!("IDT Initialized!");
+    early_println!("IDT Initialized!");
 
-    serial_println!("Initializing memory subsystem...");
+    early_println!("Initializing memory subsystem...");
     init_memory_subsys(MemoryInitInfo {
-        hhdm_offset: arch_info.hhdm_offset,
-        memmap_entry: arch_info.memmap_entry
+        hhdm_offset: BootInfo::get().hhdm_offset().unwrap(),
+        memmap_entry: BootInfo::get().memmap_entries().unwrap()
     });
-    serial_println!(" Memory subsystem initialized!");
+    early_println!("Memory subsystem initialized!");
+
+    early_println!("Initializing cpu submodule...");
+    let cpu_info = get_cpuid_full();
+    early_println!("{}", cpu_info);
+    early_println!("Cpu submodule intialized!");
+
+    early_println!("Initializing ACPI submodule...");
+    init_acpi(BootInfo::get().rsdp_addr().unwrap(), BootInfo::get().memmap_entries().unwrap());
+    early_println!("ACPI submodule intialized!");
+
+    early_println!("Initializing HPET timer...");
+    initialize_hpet();
+    early_println!("HPET timer initialized!");
+
+    early_println!("Initializing LAPIC for BSP...");
+    init_bootstrap_lapic();
+    early_println!("APIC/LAPIC initialized!");
+
+    instructions::interrupts::enable();
 }
 
+pub fn init_arch() {
+    early_println!("Initializing amd64 arch early startup...");
+    early_startup();
+    early_println!("Early startup finished! Initializing SMP...");
+    smp_startup();
+    early_println!("Amd64 arch fully initialized!");
+
+    //init_sheduler_for_percpu();
+    //start_scheduler();
+}

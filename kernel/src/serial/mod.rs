@@ -15,7 +15,6 @@ macro_rules! serial_print {
 macro_rules! serial_println {
     () => ($crate::serial_print!("\n"));
     ($($arg:tt)*) => {
-        eclipse_framebuffer::print!("{}\n", format_args!($($arg)*));
         $crate::serial_print!("{}\n", format_args!($($arg)*))
     };
 }

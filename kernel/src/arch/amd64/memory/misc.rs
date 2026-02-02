@@ -1,3 +1,5 @@
+use crate::arch::amd64::memory::pmm::HHDM_OFFSET;
+
 #[inline]
 pub const fn align_up(x: usize, a: usize) -> usize {
     (x + a - 1) & !(a - 1)
@@ -14,13 +16,13 @@ pub fn floor_log2(x: usize) -> usize {
 }
 
 #[inline]
-pub fn virt_to_phys(offset: usize, virt: usize) -> usize {
-    return virt - offset;
+pub fn virt_to_phys(virt: usize) -> usize {
+    return virt - unsafe { HHDM_OFFSET };
 }
 
 #[inline]
-pub fn phys_to_virt(offset: usize, phys: usize) -> usize {
-    return phys + offset;
+pub fn phys_to_virt(phys: usize) -> usize {
+    return phys + unsafe { HHDM_OFFSET };
 }
 
 #[inline]

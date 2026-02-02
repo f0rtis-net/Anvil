@@ -1,6 +1,6 @@
 use crate::{arch::amd64::memory::pmm::sparsemem::{
     FrameState, PAGE_SHIFT, PAGES_PER_SECTION, Pfn, SECTION_SHIFT, SparseMem,
-}, serial_println};
+}};
 
 #[derive(Debug, Clone, Copy)]
 pub struct PfnRun {

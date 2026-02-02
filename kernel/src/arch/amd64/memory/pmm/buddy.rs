@@ -57,7 +57,7 @@ impl Buddy {
             pages,
             max_order,
             free: [INVALID_PFN; MAX_ORDER + 1],
-            free_pages: 0, // важно: реально свободные появятся после add_usable_run_fast()
+            free_pages: 0,
         }
     }
 
@@ -123,9 +123,6 @@ impl Buddy {
         self.free = [INVALID_PFN; MAX_ORDER + 1];
         self.free_pages = 0;
 
-        // важно: не трогай весь диапазон, если он огромный.
-        // reset должен вызываться на зоне, которую ты реально собираешь.
-        // Но ты задаёшь base_pfn/pages ровно под зону, так что ok.
         for i in 0..self.pages {
             let pfn = self.base_pfn + i;
             if let Some(f) = get_sparse_memory().pfn_to_frame(pfn) {
@@ -137,18 +134,11 @@ impl Buddy {
         }
     }
 
-    // -----------------------------
-    // boot-init fast path
-    // -----------------------------
-
-    /// Быстро добавить run, который УЖЕ гарантированно Usable (пришёл из PfnRunIter).
-    /// Никаких block_all_usable().
     pub fn add_usable_run_fast(&mut self, start: Pfn, len: usize) {
         if len == 0 || self.pages == 0 {
             return;
         }
 
-        // clamp к зоне
         let zone_start = self.base_pfn;
         let zone_end = self.base_pfn + self.pages;
 
@@ -175,8 +165,6 @@ impl Buddy {
                 order = self.max_order;
             }
 
-            // ВАЖНО: здесь мы НЕ понижаем order проверками usable.
-            // Run гарантированно usable.
             self.insert_free_block_boot(p, order);
 
             let step = 1usize << order;
@@ -200,11 +188,9 @@ impl Buddy {
             fh.next_free = INVALID_PFN;
         }
 
-        // остальные страницы блока — не-head
         let n = 1usize << order;
         for i in 1..n {
             let p = head + i;
-            // В boot-init это допустимо: если sparse пометил их usable, мы их “занимаем” в блок.
             let f = self.frame_mut(p);
             debug_assert!(f.state == FrameState::Usable);
             f.tag = BuddyTag::Unused;
@@ -223,17 +209,13 @@ impl Buddy {
         while order < self.max_order {
             let buddy = self.buddy_of(head, order);
 
-            // Ключевой момент: никаких per-page проверок.
-            // Если buddy не free-head нужного порядка — merge невозможен.
             if !self.is_free_head(buddy, order) {
                 break;
             }
 
-            // удалить оба
             let _ = self.remove_free(head, order);
             let _ = self.remove_free(buddy, order);
 
-            // merged head
             let a = self.local(head);
             let b = self.local(buddy);
             head = if a <= b { head } else { buddy };
@@ -248,13 +230,8 @@ impl Buddy {
             }
 
             self.push_free(head, order);
-            // free_pages не меняется при merge (n+n -> 2n)
         }
     }
-
-    // -----------------------------
-    // free list primitives
-    // -----------------------------
 
     fn push_free(&mut self, head: Pfn, order: usize) {
         let old = self.free[order];
@@ -322,10 +299,6 @@ impl Buddy {
         true
     }
 
-    // -----------------------------
-    // runtime alloc/free
-    // -----------------------------
-
     pub fn alloc(&mut self, order: usize) -> Option<Pfn> {
         if order > self.max_order {
             return None;
@@ -340,17 +313,13 @@ impl Buddy {
         }
 
         let head = self.pop_free(cur)?;
-
-        // мы забираем блок размера 2^cur
         self.free_pages = self.free_pages.saturating_sub(self.order_to_pages(cur));
 
-        // split вниз до нужного order
         let mut o = cur;
         while o > order {
             o -= 1;
             let buddy = self.buddy_of(head, o);
 
-            // buddy должен быть usable — но проверка per-page не нужна
             debug_assert!(self.is_usable(buddy));
 
             {
@@ -362,7 +331,6 @@ impl Buddy {
             }
             self.push_free(buddy, o);
 
-            // мы вернули половину блока обратно
             self.free_pages += self.order_to_pages(o);
         }
 
@@ -375,7 +343,6 @@ impl Buddy {
             fh.next_free = INVALID_PFN;
         }
 
-        // внутренние страницы пометим как Unused
         let n = 1usize << order;
         for i in 1..n {
             let p = head + i;
@@ -407,7 +374,6 @@ impl Buddy {
             fh.next_free = INVALID_PFN;
         }
 
-        // коалес по buddy-head, без block_all_usable
         let merged = self.free_block_coalesce_fast(head, order);
         let final_order = self.frame_mut(merged).order as usize;
 
@@ -423,12 +389,10 @@ impl Buddy {
                 break;
             }
 
-            // remove buddy из freelist; head ещё не в freelist (мы не пушили)
             if !self.remove_free(buddy, order) {
                 break;
             }
 
-            // merge -> min(local)
             let a = self.local(head);
             let b = self.local(buddy);
             head = if a <= b { head } else { buddy };
@@ -441,7 +405,6 @@ impl Buddy {
             fh.next_free = INVALID_PFN;
         }
 
-        // пометить внутренние страницы merged блока как Unused
         let n = 1usize << order;
         for i in 1..n {
             let p = head + i;

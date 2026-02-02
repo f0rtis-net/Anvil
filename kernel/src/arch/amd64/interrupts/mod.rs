@@ -1,4 +1,4 @@
 pub mod idt;
 pub mod macros;
-mod tables;
+pub mod tables;
 mod base;

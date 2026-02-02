@@ -3,6 +3,25 @@
 version = 4
 
 [[package]]
+name = "AnvilOs"
+version = "0.1.0"
+dependencies = [
+ "acpi",
+ "bitflags 2.10.0",
+ "cc",
+ "elf",
+ "lazy_static",
+ "limine",
+ "linked_list_allocator",
+ "paste",
+ "raw-cpuid 11.6.0",
+ "spin 0.10.0",
+ "uart_16550",
+ "volatile 0.6.1",
+ "x86_64",
+]
+
+[[package]]
 name = "acpi"
 version = "6.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -57,10 +76,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2f8a2ca5ac02d09563609681103aada9e1777d54fc57a5acd7a41404f9c93b6e"
 
 [[package]]
-name = "eclipse_framebuffer"
-version = "0.1.0"
+name = "elf"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "922e54a376b11cbc31c06792f9ff48c4a26974e9c0277d9cc7940d5c65803b0d"
+checksum = "55dd888a213fc57e957abf2aa305ee3e8a28dbe05687a251f33b637cd46b0070"
 
 [[package]]
 name = "find-msvc-tools"
@@ -84,24 +103,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af6d2ee42712e7bd2c787365cd1dab06ef59a61becbf87bec7b32b970bd2594b"
 dependencies = [
  "bitflags 2.10.0",
-]
-
-[[package]]
-name = "limine-rust-template"
-version = "0.1.0"
-dependencies = [
- "acpi",
- "bitflags 2.10.0",
- "cc",
- "eclipse_framebuffer",
- "lazy_static",
- "limine",
- "linked_list_allocator",
- "paste",
- "spin 0.10.0",
- "uart_16550",
- "volatile 0.6.1",
- "x86_64",
 ]
 
 [[package]]
@@ -151,6 +152,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c297679cb867470fa8c9f67dbba74a78d78e3e98d7cf2b08d6d71540f797332"
 dependencies = [
  "bitflags 1.3.2",
+]
+
+[[package]]
+name = "raw-cpuid"
+version = "11.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "498cd0dc59d73224351ee52a95fee0f1a617a2eae0e7d9d720cc622c73a54186"
+dependencies = [
+ "bitflags 2.10.0",
 ]
 
 [[package]]
@@ -235,7 +245,7 @@ checksum = "2781db97787217ad2a2845c396a5efe286f87467a5810836db6d74926e94a385"
 dependencies = [
  "bit_field",
  "bitflags 1.3.2",
- "raw-cpuid",
+ "raw-cpuid 10.7.0",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 use spin::{Mutex, Once};
 
-use crate::{arch::amd64::memory::{misc::human_readable_size, pmm::{buddy::Buddy, pfn_iterator::PfnRunIter, sparsemem::{FrameState, PAGE_SHIFT, PAGE_SIZE, PAGES_PER_SECTION, Pfn, SECTION_SHIFT, SparseMem, get_sparse_memory}}}, serial_println};
+use crate::{arch::amd64::memory::{misc::human_readable_size, pmm::{buddy::Buddy, pfn_iterator::PfnRunIter, sparsemem::{FrameState, PAGE_SHIFT, PAGE_SIZE, PAGES_PER_SECTION, Pfn, SECTION_SHIFT, SparseMem, get_sparse_memory}}}, early_println};
 
 const MAX_ZONES: usize = 3;
 #[repr(u8)]
@@ -206,15 +206,15 @@ fn make_zone(id: ZoneId, pfn_start: Pfn, pfn_end: Pfn) -> Zone {
 fn zone_manager_statistics() {
     let zones_manager = get_zones_manager().lock();
 
-    serial_println!("\n============ Zones Manager summary ============");
+    early_println!("\n============ Zones Manager summary ============");
 
     for zone_id in get_zones() {
         let zone = zones_manager.zone(zone_id);
 
-        serial_println!("\n Zone: {:?}", zone_id);
+        early_println!("\n Zone: {:?}", zone_id);
 
         if zone.is_none() {
-            serial_println!("   Uninitialized zone!\n");
+            early_println!("   Uninitialized zone!\n");
             continue;
         }
 
@@ -223,15 +223,15 @@ fn zone_manager_statistics() {
         let zone_page_count = zone.usable_pages();
         let zone_size = human_readable_size((zone_page_count * PAGE_SIZE) as u64);
 
-        serial_println!("   Pages count:             {}", zone_page_count);
-        serial_println!("   Zone total size:         {} {}", zone_size.value, zone_size.unit.as_str());
+        early_println!("   Pages count:             {}", zone_page_count);
+        early_println!("   Zone total size:         {} {}", zone_size.value, zone_size.unit.as_str());
     }
 
-    serial_println!("============ Zones Manager summary ============\n");
+    early_println!("============ Zones Manager summary ============\n");
 }
 
 pub fn init_zones_manager() {
-    serial_println!("Initializing zones manager...");
+    early_println!("Initializing zones manager...");
 
     let dma_limit_pfn = (16 * 1024 * 1024) >> 12;
     let max_pfn = get_sparse_memory().max_present_pfn();
@@ -255,5 +255,5 @@ pub fn init_zones_manager() {
 
     zone_manager_statistics();
 
-    serial_println!(" Zones manager initialized");
+    early_println!("Zones manager initialized");
 }

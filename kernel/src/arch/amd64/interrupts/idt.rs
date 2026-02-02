@@ -1,7 +1,7 @@
-use x86_64::{VirtAddr, instructions::{self, tables::lidt}, registers::segmentation::{CS, Segment}, structures::{DescriptorTablePointer, gdt::SegmentSelector}};
+use x86_64::{VirtAddr, instructions::tables::lidt, registers::segmentation::{CS, Segment}, structures::{DescriptorTablePointer, gdt::SegmentSelector}};
 use lazy_static::lazy_static;
 
-use crate::arch::amd64::interrupts::base::init_dispatch_from_sections;
+use crate::arch::amd64::{gdt::{DOUBLE_FAULT_IST_INDEX, PAGE_FAULT_IST_INDEX}, interrupts::base::init_dispatch_from_sections};
 
 pub const IDT_COUNT: usize = 256;
 pub const ISR_COUNT: usize = 32;
@@ -88,6 +88,54 @@ lazy_static! {
         
         for i in 0..IDT_COUNT {
             let handler = unsafe { interrupts_stub_table[i] } as *const ();
+
+            if i == 3 as usize {
+                vectors[i] = IDTEntry::new(
+                    handler,
+                    CS::get_reg(),
+                    0,
+                    true,
+                    3,
+                );
+
+                continue;
+            }
+
+            if i == 128 as usize {
+                vectors[i] = IDTEntry::new(
+                    handler,
+                    CS::get_reg(),
+                    0,
+                    true,
+                    3,
+                );
+
+                continue;
+            }
+
+            if i == 14 as usize {
+                vectors[i] = IDTEntry::new(
+                    handler,
+                    CS::get_reg(),
+                    PAGE_FAULT_IST_INDEX as u8,
+                    true,
+                    0,
+                );
+                continue;
+            }
+
+            if i == 8 as usize {
+                vectors[i] = IDTEntry::new(
+                    handler,
+                    CS::get_reg(),
+                    DOUBLE_FAULT_IST_INDEX as u8,
+                    true,
+                    0,
+                );
+
+                continue;
+            }
+
             vectors[i] = IDTEntry::new(
                 handler,
                 CS::get_reg(),
@@ -104,7 +152,5 @@ lazy_static! {
 }
 
 pub fn init_idt() {
-    instructions::interrupts::disable();
     INTERRUPT_TABLE.load();
-    instructions::interrupts::enable();
 }
