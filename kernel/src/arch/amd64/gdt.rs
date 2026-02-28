@@ -10,7 +10,7 @@ use x86_64::{
     }
 };
 
-use crate::define_per_cpu_struct;
+use crate::{define_per_cpu_struct, define_per_cpu_u64, early_println};
 
 pub(crate) const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 pub(crate) const PAGE_FAULT_IST_INDEX: u16 = 1;
@@ -33,16 +33,6 @@ static mut BOOTSTRAP_TSS: MaybeUninit<TaskStateSegment> = MaybeUninit::uninit();
 
 static mut BOOTSTRAP_DOUBLE_FAULT_STACK: [u8; TSS_STACK_SIZE_BYTES] = [0; TSS_STACK_SIZE_BYTES];
 static mut BOOTSTRAP_PAGE_FAULT_STACK: [u8; TSS_STACK_SIZE_BYTES] = [0; TSS_STACK_SIZE_BYTES];
-
-
-pub fn set_rsp0(rsp0: VirtAddr) {
-    unsafe {
-        let tss_ptr = ptr::addr_of_mut!(BOOTSTRAP_TSS)
-            .cast::<TaskStateSegment>();
-
-        (*tss_ptr).privilege_stack_table[0] = rsp0;
-    }
-}
 
 fn stack_top_ptr_raw(stack: *const u8) -> VirtAddr {
     let start = VirtAddr::from_ptr(stack);
@@ -122,6 +112,7 @@ define_per_cpu_struct! {
         pub tss: MaybeUninit<TaskStateSegment>,
         pub pgf_stack: [u8; TSS_STACK_SIZE_BYTES],
         pub df_stack: [u8; TSS_STACK_SIZE_BYTES],
+        pub kernel_stack: [u8; TSS_STACK_SIZE_BYTES],
 
         pub sel_kcode: MaybeUninit<SegmentSelector>,
         pub sel_kdata: MaybeUninit<SegmentSelector>,
@@ -138,9 +129,14 @@ pub fn setup_gdt_for_local_core() {
         let pgf_stack_top = VirtAddr::from_ptr(local_gdt.pgf_stack.as_ptr())
             + TSS_STACK_SIZE_BYTES as u64;
 
+        let kernel_stack_top = VirtAddr::from_ptr(local_gdt.kernel_stack.as_ptr())
+            + TSS_STACK_SIZE_BYTES as u64;
+
         let mut tss = TaskStateSegment::new();
         tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = df_stack_top;
         tss.interrupt_stack_table[PAGE_FAULT_IST_INDEX as usize] = pgf_stack_top;
+        tss.privilege_stack_table[0]  = kernel_stack_top;
+
 
         unsafe {
             local_gdt.tss.as_mut_ptr().write(tss);

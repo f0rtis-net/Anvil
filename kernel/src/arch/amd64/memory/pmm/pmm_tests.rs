@@ -56,7 +56,7 @@ pub mod pmm_tests {
     }
 
     fn test_basic_alloc() {
-        let p = kmalloc(64, KmallocFlags::Zeroed)
+        let p = kmalloc(64, KmallocFlags::ZEROED)
             .expect("basic alloc failed");
         fill(p.as_u64() as usize, 64, 0xAA);
         check(p.as_u64() as usize, 64, 0xAA);
@@ -65,7 +65,7 @@ pub mod pmm_tests {
     }
 
     fn test_zeroed_alloc() {
-        let p = kmalloc(128, KmallocFlags::Zeroed)
+        let p = kmalloc(128, KmallocFlags::ZEROED)
             .expect("zeroed alloc failed");
         assert_zeroed(p.as_u64() as usize, 128);
         kfree(p);
@@ -73,7 +73,7 @@ pub mod pmm_tests {
     }
 
     fn test_small_alloc() {
-        let p = kmalloc(15, KmallocFlags::Zeroed)
+        let p = kmalloc(15, KmallocFlags::ZEROED)
             .expect("small alloc failed");
         fill(p.as_u64() as usize, 15, 0x11);
         check(p.as_u64() as usize, 15, 0x11);
@@ -82,10 +82,10 @@ pub mod pmm_tests {
     }
 
     fn test_page_alloc() {
-        let p = kmalloc(PAGE_SIZE, KmallocFlags::Zeroed)
+        let p = kmalloc(PAGE_SIZE, KmallocFlags::ZEROED)
             .expect("page alloc failed");
 
-        let phys = alloc_pages_by_order(0, PAllocFlags::empty()).unwrap();
+        let phys = alloc_pages_by_order(0, PAllocFlags::KERNEL).unwrap();
         let phys_u = phys.as_u64() as usize;
         let virt_u = phys_to_virt(phys_u);
 
@@ -97,9 +97,9 @@ pub mod pmm_tests {
     }
 
     fn test_multiple_allocs() {
-        let a = kmalloc(64, KmallocFlags::Zeroed).unwrap();
-        let b = kmalloc(128, KmallocFlags::Zeroed).unwrap();
-        let c = kmalloc(256, KmallocFlags::Zeroed).unwrap();
+        let a = kmalloc(64, KmallocFlags::ZEROED).unwrap();
+        let b = kmalloc(128, KmallocFlags::ZEROED).unwrap();
+        let c = kmalloc(256, KmallocFlags::ZEROED).unwrap();
 
         fill(a.as_u64() as usize, 64, 0xA1);
         fill(b.as_u64() as usize, 128, 0xB2);
@@ -117,11 +117,11 @@ pub mod pmm_tests {
     }
 
     fn test_free_and_reuse() {
-        let p1 = kmalloc(128, KmallocFlags::Zeroed).unwrap();
+        let p1 = kmalloc(128, KmallocFlags::ZEROED).unwrap();
         fill(p1.as_u64() as usize, 128, 0x77);
         kfree(p1);
 
-        let p2 = kmalloc(128, KmallocFlags::Zeroed).unwrap();
+        let p2 = kmalloc(128, KmallocFlags::ZEROED).unwrap();
         fill(p2.as_u64() as usize, 128, 0x88);
         check(p2.as_u64() as usize, 128, 0x88);
         kfree(p2);
@@ -137,7 +137,7 @@ pub mod pmm_tests {
             PAGE_SIZE,
             PAGE_SIZE + 1,
         ] {
-            let p = kmalloc(size, KmallocFlags::Zeroed)
+            let p = kmalloc(size, KmallocFlags::ZEROED)
                 .unwrap_or_else(|| panic!("alloc failed for size {}", size));
             assert_zeroed(p.as_u64() as usize, size);
             kfree(p);
@@ -151,7 +151,7 @@ pub mod pmm_tests {
         let mut ptrs = [VirtAddr::zero(); N];
 
         for i in 0..N {
-            ptrs[i] = kmalloc(64, KmallocFlags::Zeroed)
+            ptrs[i] = kmalloc(64, KmallocFlags::ZEROED)
                 .unwrap_or_else(|| panic!("stress alloc failed at {}", i));
             fill(ptrs[i].as_u64() as usize, 64, i as u8);
         }
@@ -168,8 +168,8 @@ pub mod pmm_tests {
     }
 
     fn test_no_overlap() {
-        let a = kmalloc(128, KmallocFlags::Zeroed).unwrap();
-        let b = kmalloc(128, KmallocFlags::Zeroed).unwrap();
+        let a = kmalloc(128, KmallocFlags::ZEROED).unwrap();
+        let b = kmalloc(128, KmallocFlags::ZEROED).unwrap();
 
         assert!(
             a + 128 <= b || b + 128 <= a,

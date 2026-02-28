@@ -1,5 +1,6 @@
 section .text
-extern base_trap
+global common_stub
+extern base_trap      
 
 common_stub:
     push rax
@@ -25,7 +26,14 @@ common_stub:
     mov ds, ax
     mov es, ax
 
-    mov rdi, rsp
+    mov ax, cs
+    and ax, 3           
+    cmp ax, 3
+    jne .skip_swapgs
+    swapgs
+.skip_swapgs:
+
+    mov rdi, rsp        
     call base_trap
 
     pop rax
@@ -48,18 +56,18 @@ common_stub:
     pop rbx
     pop rax
 
-    add rsp, 16
+    add rsp, 16         
     iretq
 
 %macro INTERRUPT_ERR_STUB 1
 interrupt_stub_%1:
-    push qword %1
+    push qword %1       
     jmp common_stub
 %endmacro
 
 %macro INTERRUPT_NO_ERR_STUB 1
 interrupt_stub_%1:
-    push qword 0
+    push qword 0        
     push qword %1
     jmp common_stub
 %endmacro
@@ -73,6 +81,7 @@ interrupt_stub_%1:
     %endif
     %assign i i+1
 %endrep
+
 
 %rep 224
     INTERRUPT_NO_ERR_STUB i

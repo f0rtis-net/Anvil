@@ -15,7 +15,10 @@ lazy_static! {
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        SERIAL1.lock().write_fmt(args).unwrap();
-    });
+    let flags = x86_64::registers::rflags::read();
+    x86_64::instructions::interrupts::disable();
+    SERIAL1.lock().write_fmt(args).unwrap();
+    if flags.contains(x86_64::registers::rflags::RFlags::INTERRUPT_FLAG) {
+        x86_64::instructions::interrupts::enable();
+    }
 }

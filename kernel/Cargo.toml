@@ -24,10 +24,11 @@ uart_16550 = "0.4.0"
 paste = "1.0"
 acpi = "6.0.1"
 linked_list_allocator = "0.10.5"
-bitflags = "2.10.0"
+bitflags = "2.11.0"
 raw-cpuid = "11.6.0"
 elf = {version = "0.8.0",  default-features = false}
-
+bitfield-struct = "0.12.1"
+pc-keyboard = "0.8.0"
 
 [dependencies.lazy_static]
 version = "1.0"

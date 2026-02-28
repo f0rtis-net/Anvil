@@ -1,22 +1,30 @@
-static inline long syscall0(long num) {
+static inline long syscall0(long nr) {
     long ret;
     asm volatile (
-        "syscall"
+        "int $0x80"
         : "=a"(ret)
-        : "a"(num)
-        : "rcx", "r11", "memory"
+        : "a"(nr)
+        : "memory"
     );
     return ret;
 }
 
+static inline long new_syscall0(long nr) {
+    long ret;
+    asm volatile (
+        "syscall"
+        : "=a"(ret)
+        : "a"(nr)
+        : "rcx", "r11", "memory" 
+    );
+    return ret;
+}
 
 __attribute__((noreturn))
 void _start(void) {
-    asm volatile ("int3");
-
-    asm volatile ("int $0x80");
-
-    syscall0(0);
+    syscall0(10);
+    new_syscall0(10);
+    new_syscall0(10);
 
     for (;;)
         asm volatile ("pause");

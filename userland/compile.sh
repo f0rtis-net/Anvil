@@ -4,6 +4,8 @@ x86_64-elf-gcc \
   -nostdlib \
   -nostartfiles \
   -nodefaultlibs \
+  -fno-stack-protector \
+  -O2 \
   -Wl,-e,_start \
   -Wl,-Ttext=0x400000 \
   -o user.elf \

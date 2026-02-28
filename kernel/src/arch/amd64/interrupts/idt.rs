@@ -82,6 +82,58 @@ impl IDTEntry {
     }
 }
 
+fn handle_specific_interrupts(idt_num: usize, vectors: &mut [IDTEntry], handler: *const ()) -> bool {
+    if idt_num == 3 as usize {
+        vectors[idt_num] = IDTEntry::new(
+            handler,
+            CS::get_reg(),
+            0,
+            true,
+            3,
+        );
+
+        return true;
+    }
+
+    if idt_num == 128 as usize {
+        vectors[idt_num] = IDTEntry::new(
+            handler,
+            CS::get_reg(),
+            0,
+            true,
+            3,
+        );
+
+        return true;
+    }
+
+    if idt_num == 14 as usize {
+        vectors[idt_num] = IDTEntry::new(
+            handler,
+            CS::get_reg(),
+            PAGE_FAULT_IST_INDEX as u8,
+            true,
+            0,
+        );
+        
+        return true;
+    }
+
+    if idt_num == 8 as usize {
+        vectors[idt_num] = IDTEntry::new(
+            handler,
+            CS::get_reg(),
+            DOUBLE_FAULT_IST_INDEX as u8,
+            true,
+            0,
+        );
+
+        return true;
+    }
+
+    return false;
+}
+
 lazy_static! {
     static ref INTERRUPT_TABLE: InterruptDescriptorTable = {
         let mut vectors = [IDTEntry::empty(); IDT_COUNT];
@@ -89,50 +141,7 @@ lazy_static! {
         for i in 0..IDT_COUNT {
             let handler = unsafe { interrupts_stub_table[i] } as *const ();
 
-            if i == 3 as usize {
-                vectors[i] = IDTEntry::new(
-                    handler,
-                    CS::get_reg(),
-                    0,
-                    true,
-                    3,
-                );
-
-                continue;
-            }
-
-            if i == 128 as usize {
-                vectors[i] = IDTEntry::new(
-                    handler,
-                    CS::get_reg(),
-                    0,
-                    true,
-                    3,
-                );
-
-                continue;
-            }
-
-            if i == 14 as usize {
-                vectors[i] = IDTEntry::new(
-                    handler,
-                    CS::get_reg(),
-                    PAGE_FAULT_IST_INDEX as u8,
-                    true,
-                    0,
-                );
-                continue;
-            }
-
-            if i == 8 as usize {
-                vectors[i] = IDTEntry::new(
-                    handler,
-                    CS::get_reg(),
-                    DOUBLE_FAULT_IST_INDEX as u8,
-                    true,
-                    0,
-                );
-
+            if handle_specific_interrupts(i, &mut vectors, handler) {
                 continue;
             }
 

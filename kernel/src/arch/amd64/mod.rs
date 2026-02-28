@@ -1,6 +1,6 @@
 use x86_64::instructions;
 
-use crate::{arch::amd64::{acpi::init_acpi, apic::init_bootstrap_lapic, cpu::{cpuid::get_cpuid_full, smp::startup::smp_startup}, gdt::init_bootstrap_gdt, interrupts::idt::init_idt, memory::{MemoryInitInfo, init_memory_subsys}, scheduler::{init_sheduler_for_percpu, start_scheduler}, timer::initialize_hpet}, bootinfo::BootInfo, early_println};
+use crate::{arch::amd64::{acpi::init_acpi, apic::{init_bootstrap_lapic, init_ioapic}, cpu::{cpuid::get_cpuid_full, smp::startup::smp_startup}, gdt::init_bootstrap_gdt, interrupts::idt::init_idt, memory::{MemoryInitInfo, init_memory_subsys}, scheduler::{PROGRAMM, exec_loader::make_user_task, task_storage::add_task_to_execute}, timer::initialize_hpet}, bootinfo::BootInfo, early_println};
 
 pub mod serial;
 pub mod cpu;
@@ -11,8 +11,8 @@ mod memory;
 mod acpi;
 mod apic;
 mod timer;
-mod scheduler
-;
+mod scheduler;
+
 fn early_startup() {
     instructions::interrupts::disable();
 
@@ -46,7 +46,11 @@ fn early_startup() {
 
     early_println!("Initializing LAPIC for BSP...");
     init_bootstrap_lapic();
-    early_println!("APIC/LAPIC initialized!");
+    early_println!("LAPIC initialized!");
+
+    early_println!("Initializing IOAPIC...");
+    init_ioapic();
+    early_println!("IOAPIC initialized!");
 
     instructions::interrupts::enable();
 }
@@ -57,7 +61,4 @@ pub fn init_arch() {
     early_println!("Early startup finished! Initializing SMP...");
     smp_startup();
     early_println!("Amd64 arch fully initialized!");
-
-    //init_sheduler_for_percpu();
-    //start_scheduler();
 }

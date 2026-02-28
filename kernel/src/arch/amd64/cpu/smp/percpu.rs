@@ -93,13 +93,13 @@ fn alloc_percpu_region(total_size: usize) -> VirtAddr {
     let pages = (total_size + PAGE_SIZE as usize - 1) / PAGE_SIZE as usize;
 
     if pages == 1 {
-        let phys = alloc_pages_by_order(0, PAllocFlags::Kernel | PAllocFlags::Zeroed)
+        let phys = alloc_pages_by_order(0, PAllocFlags::KERNEL | PAllocFlags::ZEROED)
             .expect("percpu page alloc failed");
         return VirtAddr::new(phys_to_virt(phys.as_u64() as usize) as u64);
     }
 
     let order = (pages.next_power_of_two().trailing_zeros()) as usize;
-    let phys = alloc_pages_by_order(order, PAllocFlags::Kernel | PAllocFlags::Zeroed)
+    let phys = alloc_pages_by_order(order, PAllocFlags::KERNEL | PAllocFlags::ZEROED)
         .expect("percpu pages alloc failed");
 
     VirtAddr::new(phys_to_virt(phys.as_u64() as usize) as u64)

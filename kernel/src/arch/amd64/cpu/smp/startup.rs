@@ -4,7 +4,7 @@ use alloc::boxed::Box;
 use limine::{mp::Cpu, response::MpResponse};
 use x86_64::instructions;
 
-use crate::{arch::amd64::{apic::init_lapic_percpu, cpu::{hlt_loop, smp::percpu::{PerCpuRegion, init_percpu_regions, set_cpu_id, set_gsbase_for_percpu_region}}, gdt::setup_gdt_for_local_core, interrupts::idt::init_idt, scheduler::{init_sheduler_for_percpu, start_scheduler}}, bootinfo::BootInfo, define_per_cpu_u32, early_println, isr};
+use crate::{arch::amd64::{apic::init_lapic_percpu, cpu::{hlt_loop, smp::percpu::{PerCpuRegion, init_percpu_regions, set_cpu_id, set_gsbase_for_percpu_region}}, gdt::setup_gdt_for_local_core, interrupts::idt::init_idt, scheduler::{init_scheduler, start_scheduler_percpu}}, bootinfo::BootInfo, define_per_cpu_u32, early_println, isr};
 
 static NUM_CPUS_BOOTSTRAPPED: AtomicU8 = AtomicU8::new(0);
 
@@ -75,15 +75,19 @@ unsafe extern "C" fn start_ap(info: &Cpu) -> ! {
     init_idt();
     init_lapic_percpu();
     instructions::interrupts::enable();
+
     NUM_CPUS_BOOTSTRAPPED.fetch_add(1, Ordering::Release);
-    init_sheduler_for_percpu();
-    start_scheduler();
+    start_scheduler_percpu();
+
+    hlt_loop()
 }
 
 pub fn smp_startup() {
     let regions = init_percpu_regions();
     let regions: &'static [PerCpuRegion] = Box::leak(regions.into_boxed_slice());
     early_println!("All cpus count: {}", regions.len());
+
+    init_scheduler(regions.len());
 
     for (i, entry) in get_smp_entries().enumerate() {
         entry.bootstrap_cpu(start_ap, &regions[i]);

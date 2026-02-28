@@ -17,7 +17,7 @@ mod cmd_args;
 mod framebuffer;
 mod early_print;
 mod bootinfo;
-
+mod misc;
 
 include!(concat!(env!("OUT_DIR"), "/kernel_version.rs"));
 

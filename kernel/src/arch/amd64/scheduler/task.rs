@@ -1,103 +1,90 @@
-use alloc::{collections::btree_map::BTreeMap, sync::Arc};
-use spin::Mutex;
+use core::cell::UnsafeCell;
+
 use x86_64::PhysAddr;
 
-use crate::arch::amd64::{gdt::{KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR}, memory::vmm::create_new_pt4_from_kernel_pt4, scheduler::stack::{DEFAULT_KERNEL_STACK_SIZE, KernelStack, allocate_kernel_stack}};
+use crate::{arch::amd64::{cpu::frames::InterruptFrame, scheduler::{addr_space::AddrSpace, stack::KernelStack}}, early_println};
 
-pub static TASKS: Mutex<Tasks> = Mutex::new(Tasks::new());
+pub type TaskIdIndex = u32;
+pub type TaskGen = u32;
 
-pub type TaskId = usize;
-
-pub(crate) type EntryPoint = extern "C" fn(*const ()) -> ();
-
-const RFLAGS_WITH_IR: u64 = 0x202;
-
-pub struct Tasks {
-    next_id: TaskId,
-    tasks: BTreeMap<TaskId, Arc<Task>>
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+pub struct TaskId {
+    pub index: TaskIdIndex,
+    pub generation: TaskGen
 }
 
-impl Tasks {
-    const fn new() -> Self {
-        Self {
-            next_id: 0,
-            tasks: BTreeMap::new()
-        }
-    }
-
-    pub fn new_task(&mut self, entrypoint: EntryPoint) -> TaskId {
-        let curr_id = self.next_id;
-        self.next_id += 1;
-
-        let task = Task::new(curr_id, entrypoint);
-        self.tasks.insert(curr_id, Arc::new(task));
-
-        curr_id
-    }
-
-    pub fn get_task(&self, id: TaskId) -> Option<Arc<Task>> {
-        self.tasks.get(&id).cloned()
-    }
+pub enum TaskState {
+    Running,
+    Ready,
+    Exiting,
+    Sleep,
 }
 
 pub struct Task {
     pub id: TaskId,
-
-    pub registers: TaskRegisters,
+    pub kernel_stack: KernelStack,
+    pub registers: UnsafeCell<TaskRegisters>,
     pub page_table: PhysAddr,
-    pub kernel_stack: KernelStack
+    pub addr_space: Option<AddrSpace>,
+    pub task_state: TaskState
 }
 
+unsafe impl Sync for Task {}
+
 impl Task {
-    pub fn new(id: TaskId, entrypoint: EntryPoint) -> Self {
-        let kernel_stack = allocate_kernel_stack(DEFAULT_KERNEL_STACK_SIZE);
-
-        let registers = TaskRegisters {
-            rflags: RFLAGS_WITH_IR,
-            ss: KERNEL_DATA_SELECTOR.0 as u64,
-            cs: KERNEL_CODE_SELECTOR.0 as u64,
-            rsp: kernel_stack.top.as_u64(),
-            rip: (entrypoint as u64),
-            ..Default::default()
-        };
-
-        let region = create_new_pt4_from_kernel_pt4();
-        
-        Self {
-            id,
-            registers,
-            page_table: region,
-            kernel_stack
-        }
+    pub fn regs_mut(&self) -> &mut TaskRegisters {
+        unsafe { &mut *self.registers.get() }
     }
 }
 
 #[derive(Debug, Default)]
-#[repr(packed)]
+#[repr(C)]
 #[allow(dead_code)]
 pub struct TaskRegisters {
-    pub(super) r15: u64,
-    pub(super) r14: u64,
-    pub(super) r13: u64,
-    pub(super) r12: u64,
-    pub(super) rbp: u64,
-    pub(super) rbx: u64,
+    pub rbp: u64,
+    pub rax: u64,
+    pub rbx: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    pub rip: u64,
+    pub cs: u64,
+    pub rflags: u64,
+    pub rsp: u64,
+    pub ss: u64,
+}
 
-    pub(super) r11: u64,
-    pub(super) r10: u64,
-    pub(super) r9: u64,
-    pub(super) r8: u64,
-    pub(super) rax: u64,
-    pub(super) rcx: u64,
-    pub(super) rdx: u64,
-    pub(super) rsi: u64,
-    pub(super) rdi: u64,
+impl TaskRegisters {
+    pub fn save_from_interrupt(&mut self, frame: &InterruptFrame) {
+        self.rbp = frame.rbp;
+        self.rax = frame.rax;
+        self.rbx = frame.rbx;
+        self.rcx = frame.rcx;
+        self.rdx = frame.rdx;
+        self.rsi = frame.rsi;
+        self.rdi = frame.rdi;
+        self.r8  = frame.r8;
+        self.r9  = frame.r9;
+        self.r10 = frame.r10;
+        self.r11 = frame.r11;
+        self.r12 = frame.r12;
+        self.r13 = frame.r13;
+        self.r14 = frame.r14;
+        self.r15 = frame.r15;
 
-    pub(super) syscall_number_or_irq_or_error_code: u64,
-
-    pub(super) rip: u64,
-    pub(super) cs: u64,
-    pub(super) rflags: u64,
-    pub(super) rsp: u64,
-    pub(super) ss: u64,
+        self.rip = frame.rip;
+        self.cs = frame.cs;
+        self.rflags = frame.rflags;
+        self.rsp = frame.rsp;
+        self.ss = frame.ss;
+    }
 }

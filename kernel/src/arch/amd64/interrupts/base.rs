@@ -1,3 +1,5 @@
+use core::arch::asm;
+
 use crate::{arch::amd64::{cpu::{frames::InterruptFrame, hlt_loop}, interrupts::{idt::{IDT_COUNT, ISR_COUNT}, tables::{__irq_table_end, __irq_table_start, __isr_table_end, __isr_table_start, Handler, InterruptDescriptor}}}, early_println};
 
 static mut HANDLERS: [Option<Handler>; IDT_COUNT] = [None; IDT_COUNT];
@@ -29,6 +31,7 @@ extern "C" fn base_trap(stack_frame: *const InterruptFrame) {
     let handler = unsafe { HANDLERS[vec] };
     if let Some(h) = handler {
         h(&frame);
+
         return;
     } 
 

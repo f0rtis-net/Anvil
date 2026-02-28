@@ -6,7 +6,7 @@ pub fn selftest_all_memory_subsystem() {
 
     let phys = alloc_pages_by_order(
         0,
-        PAllocFlags::Kernel | PAllocFlags::Zeroed
+        PAllocFlags::KERNEL | PAllocFlags::ZEROED
     ).expect("alloc_pages_by_order failed");
 
     early_println!("[mem] allocated phys frame: {:?}", phys);

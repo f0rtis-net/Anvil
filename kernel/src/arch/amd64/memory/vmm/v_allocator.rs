@@ -55,7 +55,7 @@ pub fn vmalloc(size: usize) -> Option<VirtAddr> {
     let mut pages = Vec::new();
 
     for off in (0..size).step_by(PAGE_SIZE) {
-        let phys = alloc_pages_by_order(0, PAllocFlags::Zeroed)?;
+        let phys = alloc_pages_by_order(0, PAllocFlags::ZEROED | PAllocFlags::KERNEL)?;
         kmap_page(base + off as u64, phys, PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE | PageTableFlags::NO_CACHE);
         pages.push(phys);
     }

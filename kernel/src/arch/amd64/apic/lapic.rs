@@ -1,6 +1,6 @@
 use x86_64::{PhysAddr, VirtAddr, structures::paging::{Page, PageTableFlags, Size4KiB}};
 
-use crate::{arch::amd64::memory::vmm::kmap_page, irq};
+use crate::{arch::amd64::memory::vmm::{kmap_mmio_page}, irq};
 
 
 // LAPIC registers (offsets from base addr)
@@ -68,7 +68,7 @@ impl Lapic {
             | PageTableFlags::WRITABLE 
             | PageTableFlags::NO_CACHE;
         
-        kmap_page(aligned_virt_addr, phys_addr, flags);
+        kmap_mmio_page(aligned_virt_addr, phys_addr, flags);
         
         Self {
             base: aligned_virt_addr.as_mut_ptr(),
@@ -105,7 +105,6 @@ impl Lapic {
         self.write(LAPIC_SVR, svr);
         self.read(LAPIC_SVR);
     }
-
 
     pub fn set_task_priority(&self, priority: u32) {
         self.write(LAPIC_TPR, priority);
@@ -147,9 +146,8 @@ impl Lapic {
     pub fn read_timer_current(&self) -> u32 {
         self.read(LAPIC_TIMER_CURR)
     }
+
+    pub fn is_initialized(&self) -> bool {
+        !self.base.is_null()
+    }
 }
-
-//later refactor
-irq!(0xEF, spurious_interrupt_handler, |stack| {
-
-});
