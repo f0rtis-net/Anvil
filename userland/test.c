@@ -22,9 +22,12 @@ static inline long new_syscall0(long nr) {
 
 __attribute__((noreturn))
 void _start(void) {
-    syscall0(10);
-    new_syscall0(10);
-    new_syscall0(10);
+    new_syscall0(0x60);
+    new_syscall0(0x61);
+    new_syscall0(0x62);
+    new_syscall0(0x63);
+    new_syscall0(0x64);
+    new_syscall0(0x65);
 
     for (;;)
         asm volatile ("pause");

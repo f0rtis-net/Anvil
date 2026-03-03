@@ -1,4 +1,5 @@
-pub const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102;
+pub const MSR_GS_BASE: u32 = 0xC000_0101;        
+pub const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102; 
 
 #[inline(always)]
 pub unsafe fn rdmsr(msr: u32) -> u64 {
@@ -17,13 +18,13 @@ pub unsafe fn rdmsr(msr: u32) -> u64 {
 }
 
 #[inline(always)]
-pub fn kgs_base_read_u64() -> u64 {
-    unsafe { rdmsr(MSR_KERNEL_GS_BASE) }
+pub fn gs_base_read_u64() -> u64 {
+    unsafe { rdmsr(MSR_GS_BASE) }
 }
 
 #[inline(always)]
 pub fn percpu_ptr<T>(sym: *const T) -> *mut T {
-    let gs = kgs_base_read_u64();
+    let gs = gs_base_read_u64();
     let vma = sym as u64;
     (gs.wrapping_add(vma)) as *mut T
 }
@@ -167,7 +168,7 @@ macro_rules! define_per_cpu_struct {
         impl $name {
             #[inline(always)]
             fn __gs_base_u64() -> u64 {
-                $crate::arch::amd64::cpu::smp::macros::kgs_base_read_u64()
+                $crate::arch::amd64::cpu::smp::macros::gs_base_read_u64()
             }
 
             #[inline(always)]

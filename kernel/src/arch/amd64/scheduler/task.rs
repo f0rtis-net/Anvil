@@ -2,15 +2,33 @@ use core::cell::UnsafeCell;
 
 use x86_64::PhysAddr;
 
-use crate::{arch::amd64::{cpu::frames::InterruptFrame, scheduler::{addr_space::AddrSpace, stack::KernelStack}}, early_println};
+use crate::{arch::amd64::{cpu::frames::InterruptFrame, scheduler::{addr_space::AddrSpace, stack::KernelStack}}};
 
 pub type TaskIdIndex = u32;
 pub type TaskGen = u32;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub struct TaskId {
-    pub index: TaskIdIndex,
-    pub generation: TaskGen
+    index: TaskIdIndex,
+    generation: TaskGen
+}
+
+impl TaskId {
+    pub fn new(index: TaskIdIndex) -> Self {
+        Self { index, generation: 0 }
+    }
+
+    pub fn new_full(index: TaskIdIndex, generation: TaskGen) -> Self {
+        Self { index, generation }
+    }
+
+    pub fn id(&self) -> TaskIdIndex {
+        self.index
+    }
+
+    pub fn generation(&self) -> TaskGen {
+        self.generation
+    }
 }
 
 pub enum TaskState {

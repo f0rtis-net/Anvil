@@ -2,7 +2,12 @@ use core::arch::naked_asm;
 
 use x86_64::{VirtAddr, registers::{control::{Efer, EferFlags}, model_specific::{LStar, SFMask}, rflags::RFlags}};
 
-use crate::{arch::amd64::{gdt::{USER_CODE_SELECTOR, USER_DATA_SELECTOR}, scheduler::task::TaskRegisters}, define_per_cpu_u64, early_println, irq};
+use crate::{arch::amd64::{gdt::{USER_CODE_SELECTOR, USER_DATA_SELECTOR}, scheduler::{get_per_cpu_no_guard_CURR_TASK_ID, task::TaskRegisters}}, define_per_cpu_u64, early_print, early_println, irq};
+
+struct IpcSyscallArguments {
+    ep_id: u64,
+    msg: [u64; 4],
+}
 
 struct SyscallArguments {
     syscall_number: u64,
@@ -11,11 +16,107 @@ struct SyscallArguments {
     arg3: u64,
     arg4: u64,
     arg5: u64,
-    arg6: u64
 }
 
-fn syscall_dispatcher(args: &SyscallArguments) {
-    early_println!("Called syscall dispatcher. Syscall number: {}", args.syscall_number);
+enum IpcSyscallNums {
+    IPC_SEND = 0x60,
+    IPC_RECV = 0x61,
+    IPC_CALL = 0x62,
+    IPC_REPLY = 0x63,
+    IPC_EP_CREATE = 0x64,
+    IPC_EP_DESTROY = 0x65,
+}
+
+static EP_COUNTER: core::sync::atomic::AtomicU64 = 
+    core::sync::atomic::AtomicU64::new(1);
+
+fn syscall_dispatcher(args: &SyscallArguments) -> u64 {
+    let curr_task_id = get_per_cpu_no_guard_CURR_TASK_ID();
+
+    if args.syscall_number == 0x10 {
+        let ptr = args.arg1 as *const u8;
+        let len = args.arg2 as usize;
+
+        if args.arg1 < 0x1000 || args.arg1 > 0x0000_7FFF_FFFF_FFFF {
+            return 1;
+        }
+        if len > 4096 {
+            return 1;
+        }
+
+        let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
+
+        for &byte in slice {
+            if byte == 0 { break; }
+            early_print!("{}", byte as char);
+        }
+
+        return 0;
+    }
+
+    match args.syscall_number {
+        x if x == IpcSyscallNums::IPC_EP_CREATE as u64 => {
+            let ep_id = EP_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            //early_println!("IPC_EP_CREATE task {} -> ep_id={}", curr_task_id, ep_id);
+            return ep_id;
+        },
+
+        x if x == IpcSyscallNums::IPC_SEND as u64 => {
+            let ipc = IpcSyscallArguments {
+                ep_id: args.arg1,
+                msg: [args.arg2, args.arg3, args.arg4, args.arg5]
+            };
+
+            /*early_println!(
+                "IPC_SEND task={} ep={} msg=[{} {} {} {}]",
+                curr_task_id, ipc.ep_id,
+                ipc.msg[0], ipc.msg[1], ipc.msg[2], ipc.msg[3]
+            );*/
+            let shared = 0x500000 as *mut u64;
+            unsafe {
+                core::ptr::write_volatile(shared.add(0), 1);
+                core::ptr::write_volatile(shared.add(1), ipc.msg[0]);
+                core::ptr::write_volatile(shared.add(2), ipc.msg[1]);
+                core::ptr::write_volatile(shared.add(3), ipc.msg[2]);
+                core::ptr::write_volatile(shared.add(4), ipc.msg[3]);
+                core::ptr::write_volatile(shared.add(5), 2); // STATE_READY
+            }
+
+            return 0;
+        },
+
+        x if x == IpcSyscallNums::IPC_RECV as u64 => {
+            let ipc = IpcSyscallArguments {
+                ep_id: args.arg1,
+                msg: [args.arg2, args.arg3, args.arg4, args.arg5]
+            };
+
+            let shared = 0x500000 as *mut u64;
+
+            unsafe {
+                let state = core::ptr::read_volatile(shared.add(5));
+                if state == 2 {
+                    let msg0 = core::ptr::read_volatile(shared.add(1));
+                    let msg1 = core::ptr::read_volatile(shared.add(2));
+                    let msg2 = core::ptr::read_volatile(shared.add(3));
+                    let msg3 = core::ptr::read_volatile(shared.add(4));
+                    /*early_println!(
+                        "IPC_RECV task={} ep={} got msg=[{} {} {} {}]",
+                        curr_task_id, ipc.ep_id, msg0, msg1, msg2, msg3
+                    );*/
+                    core::ptr::write_volatile(shared.add(5), 0);
+                    return 0; 
+                }
+                return 1; 
+            }
+        },
+
+        _ => {
+            early_println!("Unknown syscall: {} task={}", args.syscall_number, curr_task_id);
+            return 0;
+        }
+    }
+
 }
 
 pub fn init_syscall_subsystem() {
@@ -54,7 +155,7 @@ pub(super) unsafe extern "C" fn syscall_handler() {
         "push {user_code_selector}",    
         "push rcx",                     
 
-        "push r15",
+        "push r15", 
         "push r14",
         "push r13",
         "push r12",
@@ -74,7 +175,7 @@ pub(super) unsafe extern "C" fn syscall_handler() {
         "call {syscall_handler_inner}",
 
         "pop rbp",
-        "pop rax",
+        "pop rax", 
         "pop rbx",
         "pop rcx",
         "pop rdx",
@@ -97,7 +198,6 @@ pub(super) unsafe extern "C" fn syscall_handler() {
 
         "mov gs:{kernel_stack}, rsp",
         "mov rsp, rax",
-
         "swapgs",
         "sysretq",
 
@@ -117,24 +217,7 @@ extern "C" fn syscall_handler_inner(registers: &mut TaskRegisters) {
         arg3: registers.rdx,
         arg4: registers.r10,
         arg5: registers.r8,
-        arg6: registers.r9
     };
 
-    early_println!("Called new syscall");
-    syscall_dispatcher(&args);
+    registers.r9 = syscall_dispatcher(&args)
 }
-
-irq!(0x80, old_syscall_handler, |stack| {
-    let args = SyscallArguments {
-        syscall_number: stack.rax,
-        arg1: stack.rdi,
-        arg2: stack.rsi,
-        arg3: stack.rdx,
-        arg4: stack.r10,
-        arg5: stack.r8,
-        arg6: stack.r9
-    };
-
-    early_println!("Called old syscall");
-    syscall_dispatcher(&args);
-});

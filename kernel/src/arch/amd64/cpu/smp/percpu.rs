@@ -35,6 +35,7 @@ fn align_up_usize(x: usize, align: usize) -> usize {
 }
 
 const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102;
+pub const MSR_GS_BASE: u32 = 0xC000_0101;  
 
 #[inline(always)]
 fn wrmsr(msr: u32, val: u64) {
@@ -52,17 +53,17 @@ fn wrmsr(msr: u32, val: u64) {
 }
 
 
-#[inline(always)]
 pub fn set_gsbase_for_percpu_region(region_base: VirtAddr) {
     let percpu_vma_base = core::ptr::addr_of!(_percpu_vma_base) as u64;
     let kgs_delta = region_base.as_u64().wrapping_sub(percpu_vma_base);
-
+    
     let hi = kgs_delta >> 48;
     if hi != 0 && hi != 0xFFFF {
-        panic!("non-canonical GS base computed: {:#x}", kgs_delta);
+        panic!("non-canonical GS base: {:#x}", kgs_delta);
     }
     
-    wrmsr(MSR_KERNEL_GS_BASE, kgs_delta);
+    wrmsr(MSR_GS_BASE, kgs_delta); 
+    wrmsr(MSR_KERNEL_GS_BASE, kgs_delta); 
 }
 
 fn percpu_template() -> PerCpuTemplate {

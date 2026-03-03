@@ -1,4 +1,4 @@
-x86_64-elf-gcc \
+gcc \
   -ffreestanding \
   -fno-pie -no-pie \
   -nostdlib \

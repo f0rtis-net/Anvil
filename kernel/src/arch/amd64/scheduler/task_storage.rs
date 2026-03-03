@@ -78,16 +78,13 @@ impl TaskTable {
             let ready = Self::pack(new_gen, STATE_READY);
             slot.gen_state.store(ready, Ordering::Release);
 
-            return Some(TaskId {
-                index: i as u32,
-                generation: new_gen,
-            });
+            return Some(TaskId::new_full(i as u32, new_gen));
         }
         None
     }
 
     pub fn get(&self, id: TaskId) -> Option<Arc<Task>> {
-        let idx = id.index as usize;
+        let idx = id.id() as usize;
         if idx >= self.capacity {
             return None;
         }
@@ -96,7 +93,7 @@ impl TaskTable {
         let gs = slot.gen_state.load(Ordering::Acquire);
         let (generation, state) = Self::unpack(gs);
 
-        if generation != id.generation || state != STATE_READY {
+        if generation != id.generation() || state != STATE_READY {
             return None;
         }
 
@@ -104,7 +101,7 @@ impl TaskTable {
     }
 
     pub fn remove(&self, id: TaskId) -> bool {
-        let idx = id.index as usize;
+        let idx = id.id() as usize;
         if idx >= self.capacity {
             return false;
         }
@@ -113,7 +110,7 @@ impl TaskTable {
         let old = slot.gen_state.load(Ordering::Acquire);
         let (generation, state) = Self::unpack(old);
 
-        if generation != id.generation || state != STATE_READY {
+        if generation != id.generation() || state != STATE_READY {
             return false;
         }
 
