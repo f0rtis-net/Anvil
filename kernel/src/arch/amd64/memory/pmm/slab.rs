@@ -392,7 +392,7 @@ impl SlabAllocator {
 
         for i in 0..pages {
             if let Some(f) = sparse.pfn_to_frame(head_pfn + i) {
-                f.next_free = head_pfn;
+                unsafe { (*f).next_free = head_pfn; }
             }
         }
     }
@@ -408,7 +408,7 @@ impl SlabAllocator {
 
             for i in 0..pages {
                 if let Some(f) = sparse.pfn_to_frame(head_pfn + i) {
-                    f.next_free = INVALID_PFN;
+                    unsafe { (*f).next_free = INVALID_PFN; }
                 }
             }
 
@@ -422,7 +422,7 @@ impl SlabAllocator {
         let pfn      = virt_to_phys(ptr_u) >> PAGE_SHIFT;
         let frame    = sparse.pfn_to_frame(pfn)?;
 
-        let head_pfn = frame.next_free;
+        let head_pfn = unsafe { (*frame).next_free };
         if head_pfn == INVALID_PFN { return None; }
 
         let slab = phys_to_virt(head_pfn << PAGE_SHIFT) as *mut SlabHeader;

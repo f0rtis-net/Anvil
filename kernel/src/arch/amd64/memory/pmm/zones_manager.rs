@@ -133,16 +133,17 @@ impl ZonesManager {
             .pfn_to_frame(pfn)
             .expect("free_pages: pfn not present in sparsemem");
 
+        let (state, zid) = unsafe { ((*frame).state, (*frame).zone) };
+
         debug_assert!(
-            frame.state != FrameState::Absent,
+            state != FrameState::Absent,
             "free_pages: pfn={} is Absent", pfn
         );
         debug_assert!(
-            frame.state != FrameState::Reserved,
+            state != FrameState::Reserved,
             "free_pages: pfn={} is Reserved", pfn
         );
 
-        let zid = frame.zone;
         self.zone_mut(zid)
             .unwrap_or_else(|| panic!("free_pages: zone {:?} not initialized", zid))
             .free(pfn);

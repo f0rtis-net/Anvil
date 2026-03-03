@@ -149,8 +149,13 @@ impl SparseMem {
         self.cached_max_pfn
     }
 
+    /// Returns a raw pointer to the Frame for `pfn`.
+    ///
+    /// # Safety
+    /// The caller must ensure no two live `*mut Frame` pointers to the same PFN
+    /// are dereferenced concurrently (i.e. the PMM lock must be held).
     #[inline]
-    pub fn pfn_to_frame(&self, pfn: Pfn) -> Option<&'static mut Frame> {
+    pub fn pfn_to_frame(&self, pfn: Pfn) -> Option<*mut Frame> {
         if !self.pfn_present(pfn) {
             return None;
         }
@@ -159,7 +164,7 @@ impl SparseMem {
 
         unsafe {
             let section = &*self.sections.add(sec);
-            Some(&mut *section.frames.add(off))
+            Some(section.frames.add(off))
         }
     }
 

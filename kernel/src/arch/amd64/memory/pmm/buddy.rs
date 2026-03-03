@@ -88,7 +88,7 @@ impl Buddy {
     }
 
     #[inline]
-    unsafe fn frame_mut_unchecked(pfn: Pfn) -> &'static mut Frame {
+    unsafe fn frame_mut_unchecked(pfn: Pfn) -> *mut Frame {
         get_sparse_memory()
             .pfn_to_frame(pfn)
             .expect("buddy: pfn not present in sparsemem")
@@ -101,7 +101,7 @@ impl Buddy {
         }
         match get_sparse_memory().pfn_to_frame(pfn) {
             None    => false,
-            Some(f) => f.tag == BuddyTag::Free && f.order as usize == order,
+            Some(f) => unsafe { (*f).tag == BuddyTag::Free && (*f).order as usize == order },
         }
     }
 
@@ -112,10 +112,12 @@ impl Buddy {
         for i in 0..self.pages {
             let pfn = self.base_pfn + i;
             if let Some(f) = get_sparse_memory().pfn_to_frame(pfn) {
-                f.tag       = BuddyTag::Unused;
-                f.order     = 0;
-                f.next_free = INVALID_PFN;
-                f.prev_free = INVALID_PFN;
+                unsafe {
+                    (*f).tag       = BuddyTag::Unused;
+                    (*f).order     = 0;
+                    (*f).next_free = INVALID_PFN;
+                    (*f).prev_free = INVALID_PFN;
+                }
             }
         }
     }
@@ -220,27 +222,29 @@ impl Buddy {
     pub fn free(&mut self, head: Pfn) {
         debug_assert!(self.in_range(head), "buddy.free: pfn out of range");
 
-        let order = {
-            let fh = unsafe { Self::frame_mut_unchecked(head) };
+        let order = unsafe {
+            let fh = Self::frame_mut_unchecked(head);
             debug_assert!(
-                fh.tag == BuddyTag::Allocated,
+                (*fh).tag == BuddyTag::Allocated,
                 "buddy.free: frame is not Allocated"
             );
-            fh.tag       = BuddyTag::Free;
-            fh.prev_free = INVALID_PFN;
-            fh.next_free = INVALID_PFN;
-            fh.order as usize
+            (*fh).tag       = BuddyTag::Free;
+            (*fh).prev_free = INVALID_PFN;
+            (*fh).next_free = INVALID_PFN;
+            (*fh).order as usize
         };
 
         #[cfg(debug_assertions)]
         for i in 1..Self::order_pages(order) {
-            let p  = head + i;
-            let f  = unsafe { Self::frame_mut_unchecked(p) };
-            debug_assert!(
-                f.tag == BuddyTag::Unused,
-                "buddy.free: inner frame pfn={} has tag={:?}",
-                p, f.tag
-            );
+            let p = head + i;
+            unsafe {
+                let f = Self::frame_mut_unchecked(p);
+                debug_assert!(
+                    (*f).tag == BuddyTag::Unused,
+                    "buddy.free: inner frame pfn={} has tag={:?}",
+                    p, (*f).tag
+                );
+            }
         }
 
         self.free_pages += Self::order_pages(order);
@@ -253,14 +257,14 @@ impl Buddy {
 
         unsafe {
             let fh = Self::frame_mut_unchecked(head);
-            fh.tag       = BuddyTag::Free;
-            fh.order     = order as u8;
-            fh.prev_free = INVALID_PFN;
-            fh.next_free = old;
+            (*fh).tag       = BuddyTag::Free;
+            (*fh).order     = order as u8;
+            (*fh).prev_free = INVALID_PFN;
+            (*fh).next_free = old;
         }
 
         if old != INVALID_PFN {
-            unsafe { Self::frame_mut_unchecked(old).prev_free = head; }
+            unsafe { (*Self::frame_mut_unchecked(old)).prev_free = head; }
         }
 
         self.free[order] = head;
@@ -274,15 +278,15 @@ impl Buddy {
 
         let next = unsafe {
             let fh       = Self::frame_mut_unchecked(head);
-            let next     = fh.next_free;
-            fh.prev_free = INVALID_PFN;
-            fh.next_free = INVALID_PFN;
+            let next     = (*fh).next_free;
+            (*fh).prev_free = INVALID_PFN;
+            (*fh).next_free = INVALID_PFN;
             next
         };
 
         self.free[order] = next;
         if next != INVALID_PFN {
-            unsafe { Self::frame_mut_unchecked(next).prev_free = INVALID_PFN; }
+            unsafe { (*Self::frame_mut_unchecked(next)).prev_free = INVALID_PFN; }
         }
 
         Some(head)
@@ -292,35 +296,35 @@ impl Buddy {
         let (prev, next) = unsafe {
             let fh = Self::frame_mut_unchecked(head);
             debug_assert!(
-                fh.tag == BuddyTag::Free && fh.order as usize == order,
+                (*fh).tag == BuddyTag::Free && (*fh).order as usize == order,
                 "remove_free: pfn={} tag={:?} order={} expected order={}",
-                head, fh.tag, fh.order, order
+                head, (*fh).tag, (*fh).order, order
             );
-            let p = fh.prev_free;
-            let n = fh.next_free;
-            fh.prev_free = INVALID_PFN;
-            fh.next_free = INVALID_PFN;
+            let p = (*fh).prev_free;
+            let n = (*fh).next_free;
+            (*fh).prev_free = INVALID_PFN;
+            (*fh).next_free = INVALID_PFN;
             (p, n)
         };
 
         if prev != INVALID_PFN {
-            unsafe { Self::frame_mut_unchecked(prev).next_free = next; }
+            unsafe { (*Self::frame_mut_unchecked(prev)).next_free = next; }
         } else {
             self.free[order] = next;
         }
 
         if next != INVALID_PFN {
-            unsafe { Self::frame_mut_unchecked(next).prev_free = prev; }
+            unsafe { (*Self::frame_mut_unchecked(next)).prev_free = prev; }
         }
     }
 
     fn mark_block_free_head(&mut self, head: Pfn, order: usize) {
         unsafe {
             let fh       = Self::frame_mut_unchecked(head);
-            fh.tag       = BuddyTag::Free;
-            fh.order     = order as u8;
-            fh.prev_free = INVALID_PFN;
-            fh.next_free = INVALID_PFN;
+            (*fh).tag       = BuddyTag::Free;
+            (*fh).order     = order as u8;
+            (*fh).prev_free = INVALID_PFN;
+            (*fh).next_free = INVALID_PFN;
         }
 
         for i in 1..Self::order_pages(order) {
@@ -330,15 +334,15 @@ impl Buddy {
                 "mark_block_free_head: pfn={} out of zone", p
             );
             unsafe {
-                let f    = Self::frame_mut_unchecked(p);
+                let f = Self::frame_mut_unchecked(p);
                 debug_assert!(
-                    f.state == FrameState::Usable,
-                    "mark_block_free_head: inner pfn={} state={:?}", p, f.state
+                    (*f).state == FrameState::Usable,
+                    "mark_block_free_head: inner pfn={} state={:?}", p, (*f).state
                 );
-                f.tag       = BuddyTag::Unused;
-                f.order     = 0;
-                f.prev_free = INVALID_PFN;
-                f.next_free = INVALID_PFN;
+                (*f).tag       = BuddyTag::Unused;
+                (*f).order     = 0;
+                (*f).prev_free = INVALID_PFN;
+                (*f).next_free = INVALID_PFN;
             }
         }
     }
@@ -346,10 +350,10 @@ impl Buddy {
     fn mark_block_allocated(&mut self, head: Pfn, order: usize) {
         unsafe {
             let fh       = Self::frame_mut_unchecked(head);
-            fh.tag       = BuddyTag::Allocated;
-            fh.order     = order as u8;
-            fh.prev_free = INVALID_PFN;
-            fh.next_free = INVALID_PFN;
+            (*fh).tag       = BuddyTag::Allocated;
+            (*fh).order     = order as u8;
+            (*fh).prev_free = INVALID_PFN;
+            (*fh).next_free = INVALID_PFN;
         }
     }
 }
