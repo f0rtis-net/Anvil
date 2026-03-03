@@ -76,9 +76,7 @@ static CPU_NUM: AtomicU64 = AtomicU64::new(0);
 
 define_per_cpu_struct! {
     struct PerCpuSchedulerData {
-        pub relaxed_ticks: usize,
         pub cpu_idx: usize,
-        pub is_first_run: bool,
         pub in_rescheduling: bool,
     }
 }
@@ -88,15 +86,6 @@ define_per_cpu_u32!(pub(crate) CURR_TASK_ID);
 pub fn init_scheduler(n_cpus: usize) {
     SCHEDULER.call_once(|| Scheduler::new(n_cpus));
 
-    /*let task = make_kernel_task(TaskId::new(0), first_task as u64);
-    add_task_to_execute(task).unwrap();
-
-    let task1 = make_kernel_task(TaskId::new(0), first_task as u64);
-    add_task_to_execute(task1).unwrap();
-
-    let task1 = make_kernel_task(TaskId::new(0), first_task as u64);
-    add_task_to_execute(task1).unwrap();*/
-    
     let client = make_user_task(CLIENT, 2).unwrap();
     add_task_to_execute(client).unwrap();
 
@@ -104,37 +93,25 @@ pub fn init_scheduler(n_cpus: usize) {
     add_task_to_execute(server).unwrap();
 }  
 
-extern "C" fn first_task() {
-    hlt_loop()
-}
-
 extern "C" fn idle_task() -> ! {
-    const BATCH: usize = 32;
+    const STEAL_BATCH: usize = 4;
 
-    let mut inj_buf: [Option<TaskId>; BATCH] = [None; BATCH];
-    let mut steal_buf: Vec<Option<Arc<Task>>> = (0..BATCH).map(|_| None).collect();
+    let mut inj_buf:   [Option<TaskId>;      STEAL_BATCH] = [None; STEAL_BATCH];
+    let mut steal_buf: [Option<Arc<Task>>;   STEAL_BATCH] = [None, None, None, None];
 
     loop {
         let percpu_data = PerCpuSchedulerData::get_mut();
-        let scheduler = SCHEDULER.get().unwrap();
-        let cpu = scheduler.cpu(percpu_data.cpu_idx);
+        let scheduler   = SCHEDULER.get().unwrap();
+        let cpu         = scheduler.cpu(percpu_data.cpu_idx);
 
-        if percpu_data.is_first_run {
-            percpu_data.is_first_run = false;
-        } else if percpu_data.relaxed_ticks < 1000_000_00 {
-            percpu_data.relaxed_ticks += 1;
-            continue;
-        }
-
-        percpu_data.relaxed_ticks = 0;
+        percpu_data.in_rescheduling = true;
 
         let n = steal_injected(&mut inj_buf);
-
         if n > 0 {
-            for i in 0..n {
-                if let Some(task_id) = inj_buf[i].take() {
+            for slot in inj_buf[..n].iter_mut() {
+                if let Some(task_id) = slot.take() {
                     if let Some(task) = get_task(task_id) {
-                        cpu.tasks.push(task); 
+                        cpu.tasks.push(task);
                     }
                 }
             }
@@ -143,11 +120,10 @@ extern "C" fn idle_task() -> ! {
         }
 
         let n = scheduler.try_to_steal_into(percpu_data.cpu_idx, &mut steal_buf);
-
         if n > 0 {
-            for i in 0..n {
-                if let Some(task) = steal_buf[i].take() {
-                    cpu.tasks.push(task); 
+            for slot in steal_buf[..n].iter_mut() {
+                if let Some(task) = slot.take() {
+                    cpu.tasks.push(task);
                 }
             }
             percpu_data.in_rescheduling = false;
@@ -163,7 +139,6 @@ pub fn start_scheduler_percpu()  {
     let cpu_id = CPU_NUM.fetch_add(1, Ordering::Relaxed) as usize;
 
     PerCpuSchedulerData::with_guard(|data| {
-        data.is_first_run = true;
         data.cpu_idx = cpu_id;
     });
 
@@ -218,16 +193,18 @@ fn scheduler_tick(frame: &InterruptFrame) {
             (false, Some(next)) => {
                 (*curr_task).regs_mut().save_from_interrupt(frame);
                 (*curr_task).task_state = TaskState::Ready;
-                
+
+                // Reconstruct Arc from the raw pointer we stored when we switched
+                // to this task (refcount = 1, no clone needed).
                 let curr_arc = Arc::from_raw(curr_task);
-                let curr_arc_clone = Arc::clone(&curr_arc);
-                let _ = Arc::into_raw(curr_arc); 
-                
+
                 let next_ptr = Arc::into_raw(next) as *mut Task;
-                cpu.set_curr_task(next_ptr);
                 (*next_ptr).task_state = TaskState::Running;
-                
-                cpu.tasks.push(curr_arc_clone); 
+                cpu.set_curr_task(next_ptr);
+
+                // Transfer ownership of curr back into the queue (refcount stays 1).
+                cpu.tasks.push(curr_arc);
+
                 set_per_cpu_CURR_TASK_ID((*next_ptr).id.id());
                 set_per_cpu_TOP_OF_KERNEL_STACK((*next_ptr).kernel_stack.top.as_u64());
                 force_task_context((*next_ptr).page_table, (*next_ptr).regs_mut());

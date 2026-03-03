@@ -36,29 +36,49 @@ impl Runqueue {
     }
 
     pub fn pop(&self) -> Option<Arc<Task>> {
-        let b = self.bottom.load(Ordering::Relaxed).wrapping_sub(1);
+        // Load bottom and top BEFORE any decrement.
+        // If the queue is already empty (b == t) we must NOT decrement b,
+        // because wrapping_sub(1) when b == 0 produces usize::MAX, making the
+        // unsigned `t <= b` check spuriously true and leaving bottom corrupted.
+        let b_orig = self.bottom.load(Ordering::Relaxed);
+        let t_snap  = self.top.load(Ordering::Acquire);
+
+        if b_orig == t_snap {
+            return None; // empty — nothing to do
+        }
+
+        let b = b_orig.wrapping_sub(1);
         self.bottom.store(b, Ordering::Relaxed);
+
+        // SeqCst fence so stealers see the new bottom before we read top,
+        // preventing a double-claim of the last element.
         fence(Ordering::SeqCst);
         let t = self.top.load(Ordering::Relaxed);
-        
+
         if t <= b {
             let ptr = self.buf[b % RQ_CAP].load(Ordering::Relaxed);
-            
+
             if t == b {
-                if self.top.compare_exchange(t, t.wrapping_add(1), 
-                                             Ordering::SeqCst, 
-                                             Ordering::Relaxed).is_err() {
-                    self.bottom.store(b.wrapping_add(1), Ordering::Relaxed);
+                // Last element: race with stealers via CAS.
+                let won = self.top
+                    .compare_exchange(t, t.wrapping_add(1),
+                                      Ordering::SeqCst,
+                                      Ordering::Relaxed)
+                    .is_ok();
+                // Restore bottom regardless — top advanced (or stealer took it).
+                self.bottom.store(b.wrapping_add(1), Ordering::Relaxed);
+                if !won {
                     return None;
                 }
-                self.bottom.store(b.wrapping_add(1), Ordering::Relaxed);
             }
-            
+
+            debug_assert!(!ptr.is_null(), "runqueue: null pointer in occupied slot");
             if ptr.is_null() {
                 return None;
             }
-            return Some(unsafe { Arc::from_raw(ptr) });
+            Some(unsafe { Arc::from_raw(ptr) })
         } else {
+            // All remaining elements were stolen while we decremented; restore.
             self.bottom.store(b.wrapping_add(1), Ordering::Relaxed);
             None
         }
