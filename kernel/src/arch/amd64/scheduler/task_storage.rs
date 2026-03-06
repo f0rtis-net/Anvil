@@ -1,4 +1,4 @@
-use core::{cell::UnsafeCell, hint::spin_loop, ptr::NonNull, sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering}};
+use core::{cell::UnsafeCell, hint::spin_loop, sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering}};
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use spin::Once;
@@ -53,34 +53,64 @@ impl TaskTable {
     }
 
     pub fn insert(&self, task: Arc<Task>) -> Option<TaskId> {
-        for (i, slot) in self.slots.iter().enumerate() {
-            let old = slot.gen_state.load(Ordering::Acquire);
-            let (generation, state) = Self::unpack(old);
-
-            if state != STATE_FREE {
-                continue;
-            }
-
-            let new_gen = generation.wrapping_add(1);
-            let reserved = Self::pack(new_gen, STATE_RESERVED);
-
-            if slot.gen_state.compare_exchange(
-                old,
-                reserved,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ).is_err() {
-                continue;
-            }
-
-            unsafe { *slot.task.get() = Some(task); }
-
-            let ready = Self::pack(new_gen, STATE_READY);
-            slot.gen_state.store(ready, Ordering::Release);
-
-            return Some(TaskId::new_full(i as u32, new_gen));
+        let idx = unsafe { (*Arc::as_ptr(&task)).id.id() as usize };
+        if idx >= self.capacity {
+            return None;
         }
-        None
+
+        let slot = &self.slots[idx];
+        let old = slot.gen_state.load(Ordering::Acquire);
+        let (generation, state) = Self::unpack(old);
+
+        if state != STATE_FREE {
+            return None;
+        }
+
+        let new_gen = generation.wrapping_add(1);
+        let reserved = Self::pack(new_gen, STATE_RESERVED);
+
+        if slot.gen_state.compare_exchange(
+            old,
+            reserved,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ).is_err() {
+            return None;
+        }
+
+        unsafe { *slot.task.get() = Some(task); }
+
+        slot.gen_state.store(Self::pack(new_gen, STATE_READY), Ordering::Release);
+
+        Some(TaskId::new_full(idx as u32, new_gen))
+    }
+
+    pub fn get_by_index(&self, idx: u32) -> Option<Arc<Task>> {
+        let index = idx as usize;
+        if index >= self.capacity {
+            return None;
+        }
+        let slot = &self.slots[index];
+        let gs = slot.gen_state.load(Ordering::Acquire);
+        let (_, state) = Self::unpack(gs);
+        if state != STATE_READY {
+            return None;
+        }
+        unsafe { (*slot.task.get()).as_ref().cloned() }
+    }
+
+    pub fn get_slot_id(&self, idx: u32) -> Option<TaskId> {
+        let index = idx as usize;
+        if index >= self.capacity {
+            return None;
+        }
+        let slot = &self.slots[index];
+        let gs = slot.gen_state.load(Ordering::Acquire);
+        let (generation, state) = Self::unpack(gs);
+        if state != STATE_READY {
+            return None;
+        }
+        Some(TaskId::new_full(idx, generation))
     }
 
     pub fn get(&self, id: TaskId) -> Option<Arc<Task>> {
@@ -315,4 +345,14 @@ pub fn steal_injected(buf: &mut [Option<TaskId>]) -> usize {
 
 pub fn injection_empty() -> bool {
     queue().is_empty()
+}
+
+pub fn get_task_by_index(idx: u32) -> Option<Arc<Task>> {
+    table().get_by_index(idx)
+}
+
+pub fn inject_sleeping_task(idx: u32) {
+    if let Some(full_id) = table().get_slot_id(idx) {
+        queue().push_spin(full_id);
+    }
 }

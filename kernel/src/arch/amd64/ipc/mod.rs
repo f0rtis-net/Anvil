@@ -74,7 +74,8 @@ pub enum IpcResult {
         message:  FastMessage,
     },
     WakeSender {
-        sender: TaskIdIndex,
+        sender:  TaskIdIndex,
+        message: FastMessage,
     },
     BlockCurrent,
     Done,
@@ -91,6 +92,10 @@ impl IpcManager {
         IpcManager {
             table: EndpointTable::new(),
         }
+    }
+
+    pub fn create_endpoint(&mut self) -> Option<EndpointId> {
+        self.table.create_endpoint()
     }
 
     pub fn handle_send(
@@ -130,7 +135,7 @@ impl IpcManager {
 
         match ep.try_recv(receiver_id) {
             Ok(Some(PendingSend { task_id: sender_id, message })) => {
-                IpcResult::WakeSender { sender: sender_id }
+                IpcResult::WakeSender { sender: sender_id, message }
             }
             Ok(None) => {
                 IpcResult::BlockCurrent

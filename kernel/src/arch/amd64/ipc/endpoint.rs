@@ -1,6 +1,6 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::arch::amd64::{ipc::{IpcError, message::FastMessage}, scheduler::task::{TaskId, TaskIdIndex}};
+use crate::arch::amd64::{ipc::{IpcError, message::FastMessage}, scheduler::task::{TaskIdIndex}};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
@@ -11,6 +11,10 @@ static NEXT_EP_ID: AtomicU64 = AtomicU64::new(1);
 impl EndpointId {
     pub fn alloc() -> Self {
         EndpointId(NEXT_EP_ID.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub fn new(id: u64) -> Self {
+        EndpointId(id)
     }
 }
 

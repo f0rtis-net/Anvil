@@ -2,7 +2,7 @@ use core::arch::naked_asm;
 
 use x86_64::{VirtAddr, registers::{control::{Efer, EferFlags}, model_specific::{LStar, SFMask}, rflags::RFlags}};
 
-use crate::{arch::amd64::{gdt::{USER_CODE_SELECTOR, USER_DATA_SELECTOR}, scheduler::{get_per_cpu_no_guard_CURR_TASK_ID, task::TaskRegisters}}, define_per_cpu_u64, early_print, early_println, irq};
+use crate::{arch::amd64::{gdt::{USER_CODE_SELECTOR, USER_DATA_SELECTOR}, ipc::{IPC_MANAGER, IpcResult, endpoint::EndpointId, message::{FastMessage, MsgLabel}}, scheduler::{block_current_ipc, direct_transfer_ipc, get_per_cpu_no_guard_CURR_TASK_ID, task::TaskRegisters, task_storage::inject_sleeping_task}}, define_per_cpu_u64, early_print, early_println, irq};
 
 struct IpcSyscallArguments {
     ep_id: u64,
@@ -27,10 +27,9 @@ enum IpcSyscallNums {
     IPC_EP_DESTROY = 0x65,
 }
 
-static EP_COUNTER: core::sync::atomic::AtomicU64 = 
-    core::sync::atomic::AtomicU64::new(1);
-
-fn syscall_dispatcher(args: &SyscallArguments) -> u64 {
+/// Returns the IPC error code (0 = ok, 1 = error) for normal (sysretq) returns.
+/// For BlockCurrent the function diverges and never returns to the caller.
+fn syscall_dispatcher(registers: &mut TaskRegisters, args: &SyscallArguments) -> u64 {
     let curr_task_id = get_per_cpu_no_guard_CURR_TASK_ID();
 
     if args.syscall_number == 0x10 {
@@ -56,58 +55,66 @@ fn syscall_dispatcher(args: &SyscallArguments) -> u64 {
 
     match args.syscall_number {
         x if x == IpcSyscallNums::IPC_EP_CREATE as u64 => {
-            let ep_id = EP_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            //early_println!("IPC_EP_CREATE task {} -> ep_id={}", curr_task_id, ep_id);
+            let ep_id = IPC_MANAGER.lock().create_endpoint().unwrap().0;
             return ep_id;
         },
 
         x if x == IpcSyscallNums::IPC_SEND as u64 => {
             let ipc = IpcSyscallArguments {
                 ep_id: args.arg1,
-                msg: [args.arg2, args.arg3, args.arg4, args.arg5]
+                msg: [args.arg2, args.arg3, args.arg4, args.arg5],
             };
+            let msg    = FastMessage::with_data(MsgLabel::NOTIFY, ipc.msg);
+            let result = IPC_MANAGER.lock().handle_send(
+                curr_task_id,
+                EndpointId::new(ipc.ep_id),
+                msg,
+            );
 
-            /*early_println!(
-                "IPC_SEND task={} ep={} msg=[{} {} {} {}]",
-                curr_task_id, ipc.ep_id,
-                ipc.msg[0], ipc.msg[1], ipc.msg[2], ipc.msg[3]
-            );*/
-            let shared = 0x500000 as *mut u64;
-            unsafe {
-                core::ptr::write_volatile(shared.add(0), 1);
-                core::ptr::write_volatile(shared.add(1), ipc.msg[0]);
-                core::ptr::write_volatile(shared.add(2), ipc.msg[1]);
-                core::ptr::write_volatile(shared.add(3), ipc.msg[2]);
-                core::ptr::write_volatile(shared.add(4), ipc.msg[3]);
-                core::ptr::write_volatile(shared.add(5), 2); // STATE_READY
+            match result {
+                IpcResult::DirectTransfer { receiver, message } => {
+                    direct_transfer_ipc(receiver, &message);
+                    return 0;
+                }
+
+                IpcResult::BlockCurrent => {
+                    registers.r9 = 0;
+                    block_current_ipc(registers);
+                }
+
+                IpcResult::Error(_) => return 1,
+                _ => return 0,
             }
-
-            return 0;
         },
 
         x if x == IpcSyscallNums::IPC_RECV as u64 => {
             let ipc = IpcSyscallArguments {
                 ep_id: args.arg1,
-                msg: [args.arg2, args.arg3, args.arg4, args.arg5]
+                msg: [args.arg2, args.arg3, args.arg4, args.arg5],
             };
+            let result = IPC_MANAGER.lock().handle_recv(
+                curr_task_id,
+                EndpointId::new(ipc.ep_id),
+            );
 
-            let shared = 0x500000 as *mut u64;
-
-            unsafe {
-                let state = core::ptr::read_volatile(shared.add(5));
-                if state == 2 {
-                    let msg0 = core::ptr::read_volatile(shared.add(1));
-                    let msg1 = core::ptr::read_volatile(shared.add(2));
-                    let msg2 = core::ptr::read_volatile(shared.add(3));
-                    let msg3 = core::ptr::read_volatile(shared.add(4));
-                    /*early_println!(
-                        "IPC_RECV task={} ep={} got msg=[{} {} {} {}]",
-                        curr_task_id, ipc.ep_id, msg0, msg1, msg2, msg3
-                    );*/
-                    core::ptr::write_volatile(shared.add(5), 0);
-                    return 0; 
+            match result {
+                IpcResult::WakeSender { sender, message } => {
+                    registers.rdi = message.label.0;
+                    registers.rsi = message.data[0];
+                    registers.rdx = message.data[1];
+                    registers.r10 = message.data[2];
+                    registers.r8  = message.data[3];
+                    inject_sleeping_task(sender);
+                    return 0;
                 }
-                return 1; 
+
+                IpcResult::BlockCurrent => {
+                    registers.r9 = 0;
+                    block_current_ipc(registers);
+                }
+
+                IpcResult::Error(_) => return 1,
+                _ => return 0,
             }
         },
 
@@ -209,7 +216,7 @@ pub(super) unsafe extern "C" fn syscall_handler() {
     )
 }
 
-extern "C" fn syscall_handler_inner(registers: &mut TaskRegisters) { 
+extern "C" fn syscall_handler_inner(registers: &mut TaskRegisters) {
     let args = SyscallArguments {
         syscall_number: registers.rax,
         arg1: registers.rdi,
@@ -219,5 +226,7 @@ extern "C" fn syscall_handler_inner(registers: &mut TaskRegisters) {
         arg5: registers.r8,
     };
 
-    registers.r9 = syscall_dispatcher(&args)
+    // syscall_dispatcher either returns a u64 result code (normal sysretq path)
+    // or diverges via block_current_ipc (context-switch path).
+    registers.r9 = syscall_dispatcher(registers, &args);
 }

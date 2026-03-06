@@ -55,7 +55,7 @@ impl Task {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 #[repr(C)]
 #[allow(dead_code)]
 pub struct TaskRegisters {
