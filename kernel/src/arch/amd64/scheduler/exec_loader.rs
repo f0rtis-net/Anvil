@@ -2,25 +2,12 @@ use core::cell::UnsafeCell;
 
 use x86_64::{PhysAddr, VirtAddr, registers::control::Cr3, structures::paging::{Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB}};
 
-use crate::arch::amd64::{gdt::{KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR, USER_CODE_SELECTOR, USER_DATA_SELECTOR}, memory::{misc::{pages_to_order, phys_to_virt}, pmm::pages_allocator::{PAllocFlags, alloc_pages_by_order}, vmm::{KernelFrameAllocator, PAGE_SIZE, create_new_pt4_from_kernel_pt4, kernel_pt}}, scheduler::{elf::ElfParsed, stack::{DEFAULT_KERNEL_STACK_SIZE, allocate_kernel_stack}, task::{Task, TaskId, TaskIdIndex, TaskRegisters, TaskState}}};
+use crate::{arch::amd64::{gdt::{KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR, USER_CODE_SELECTOR, USER_DATA_SELECTOR}, memory::{misc::{pages_to_order, phys_to_virt}, pmm::pages_allocator::{PAllocFlags, alloc_pages_by_order}, vmm::{KernelFrameAllocator, PAGE_SIZE, create_new_pt4_from_kernel_pt4, kernel_pt}}, scheduler::{elf::ElfParsed, stack::{DEFAULT_KERNEL_STACK_SIZE, allocate_kernel_stack}, task::{Task, TaskId, TaskIdIndex, TaskRegisters, TaskState}}}, early_println};
 
 const RFLAGS_WITH_IR: u64 = 0x202;
 const USER_STACK_PAGES_COUNT: usize = 4;
 const USER_STACK_TOP_VIRT_ADDR: u64 = 0x7FFF_FFFF_0000;
 
-static SHARED_MEM_PHYS: core::sync::atomic::AtomicU64 = 
-    core::sync::atomic::AtomicU64::new(0);
-
-fn get_or_create_shared_frame() -> PhysAddr {
-    let existing = SHARED_MEM_PHYS.load(core::sync::atomic::Ordering::Relaxed);
-    if existing != 0 {
-        return PhysAddr::new(existing);
-    }
-    let phys = alloc_pages_by_order(0, PAllocFlags::KERNEL | PAllocFlags::ZEROED)
-        .expect("failed to alloc shared mem");
-    SHARED_MEM_PHYS.store(phys.as_u64(), core::sync::atomic::Ordering::Relaxed);
-    phys
-}
 
 fn phys_to_offset_page_table(table: PhysAddr) -> OffsetPageTable<'static> {
     let phys_offset = kernel_pt().lock().phys_offset();
@@ -116,24 +103,6 @@ pub fn make_user_task(bytes: &[u8], task_id: TaskIdIndex) -> Result<Task, &'stat
                 .flush();
         }
     }
-
-    // === Shared memory костыль ===
-    let shared_phys = get_or_create_shared_frame();
-    let shared_frame = PhysFrame::<Size4KiB>::containing_address(shared_phys);
-    let shared_page = Page::<Size4KiB>::containing_address(
-        VirtAddr::new(0x500000)
-    );
-    let shared_flags = PageTableFlags::PRESENT
-        | PageTableFlags::WRITABLE
-        | PageTableFlags::USER_ACCESSIBLE
-        | PageTableFlags::NO_EXECUTE;
-
-    unsafe {
-        pt.map_to(shared_page, shared_frame, shared_flags, &mut KernelFrameAllocator)
-            .unwrap()
-            .flush();
-    }
-    // === конец костыля ===
     
     let kernel_stack = allocate_kernel_stack(DEFAULT_KERNEL_STACK_SIZE);
 
@@ -176,6 +145,6 @@ pub fn make_kernel_task(id: TaskId, entry_point: u64) -> Task {
         registers: UnsafeCell::new(registers),
         page_table: phys_add_of_pt,
         addr_space: None,
-        task_state: TaskState::Ready
+        task_state: TaskState::Ready,
     }
 }

@@ -7,35 +7,29 @@ static void server_log(const char* msg) {
 
 __attribute__((noreturn))
 void _start(void) {
-    long ep_id = ipc_ep_create(); /* сервер стартует первым => ep_id = 1 */
-    print_str("Server: created ep_endpoint. Ep num: ");
-    print_num(ep_id);
-    print_str("\n");
+    long ep_id = ipc_ep_create();
+    printf("Server: created ep_endpoint. Ep num: %u\n", ep_id);
 
     for (;;) {
         ipc_msg_t msg;
 
-        /* Блокируемся до прихода сообщения */
         if (ipc_recv_msg((uint64_t)ep_id, &msg) != 0) {
-            print_str("Server: recv error\n");
+            printf("Server: recv error\n");
             continue;
         }
 
-        uint64_t seq       = msg.data[0]; /* i */
-        uint64_t client_ep = msg.data[1]; /* ep клиента */
+        uint64_t seq       = msg.data[0];
+        uint64_t client_ep = 2;
 
-        print_str("Server: got message seq=");
-        print_num(seq);
-        print_str(" from client_ep=");
-        print_num(client_ep);
-        print_str("\n");
+        printf("Server: got message seq=%u from client_ep=%u\n", seq, client_ep);
 
-        /* IPC_REPLY не реализован в ядре — используем обычный SEND */
         uint64_t ret = ipc_send(client_ep, seq, 0, 0, 0);
         if (ret == 0) {
-            print_str("Server: reply sent\n");
+            printf("Server: reply sent\n");
         } else {
-            print_str("Server: reply failed\n");
+            printf("Server: reply failed\n");
         }
     }
+   
+    for (;;) { spin_pause(); }
 }

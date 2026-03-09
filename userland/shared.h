@@ -122,7 +122,7 @@ static inline uint64_t ipc_recv_msg(uint64_t ep_id, ipc_msg_t *out) {
     __asm__ volatile (
         "syscall"
         : "=r"(r9), "=r"(rsi), "=r"(rdx), "=r"(r10), "=r"(r8),
-          "+r"(rdi)  /* rdi = label out */
+          "+r"(rdi)  
         : "a"((uint64_t)SYS_IPC_RECV)
         : "rcx", "r11", "r12", "r13", "r14", "r15", "memory"
     );
@@ -134,7 +134,7 @@ static inline uint64_t ipc_recv_msg(uint64_t ep_id, ipc_msg_t *out) {
         out->data[2] = r10;
         out->data[3] = r8;
     }
-    return r9; /* 0 = ok, 1 = error */
+    return r9; 
 }
 
 static inline uint64_t ipc_ep_create(void) {
@@ -180,26 +180,111 @@ static inline uint64_t sys_print(const char *str, uint64_t len) {
     return syscall2(SYS_PRINT, (uint64_t)str, len);
 }
 
-static inline void print_str(const char *str) {
-    uint64_t len = 0;
-    while (str[len]) len++;
-    sys_print(str, len);
+static inline int vsnprintf_simple(char *buf, int size, const char *fmt, __builtin_va_list ap) {
+    int pos = 0;
+
+#define PUT(c) do { if (pos < size - 1) buf[pos++] = (c); } while(0)
+
+    while (*fmt) {
+        if (*fmt != '%') {
+            PUT(*fmt++);
+            continue;
+        }
+        fmt++; // skip '%'
+
+        // флаги
+        int zero_pad = 0;
+        int width = 0;
+        if (*fmt == '0') { zero_pad = 1; fmt++; }
+        while (*fmt >= '0' && *fmt <= '9') {
+            width = width * 10 + (*fmt++ - '0');
+        }
+
+        switch (*fmt++) {
+            case 'd': case 'i': {
+                long val = __builtin_va_arg(ap, long);
+                char tmp[32];
+                int neg = 0, i = 30;
+                tmp[31] = '\0';
+                if (val < 0) { neg = 1; val = -val; }
+                if (val == 0) tmp[i--] = '0';
+                while (val > 0) { tmp[i--] = '0' + (val % 10); val /= 10; }
+                if (neg) tmp[i--] = '-';
+                const char *s = &tmp[i + 1];
+                int len = 30 - i;
+                for (int p = len; p < width; p++) PUT(zero_pad ? '0' : ' ');
+                while (*s) PUT(*s++);
+                break;
+            }
+            case 'u': {
+                unsigned long val = __builtin_va_arg(ap, unsigned long);
+                char tmp[32];
+                int i = 30;
+                tmp[31] = '\0';
+                if (val == 0) tmp[i--] = '0';
+                while (val > 0) { tmp[i--] = '0' + (val % 10); val /= 10; }
+                const char *s = &tmp[i + 1];
+                int len = 30 - i;
+                for (int p = len; p < width; p++) PUT(zero_pad ? '0' : ' ');
+                while (*s) PUT(*s++);
+                break;
+            }
+            case 'x': case 'X': {
+                unsigned long val = __builtin_va_arg(ap, unsigned long);
+                const char *hex = (*( fmt - 1) == 'X') ? "0123456789ABCDEF" : "0123456789abcdef";
+                char tmp[32];
+                int i = 30;
+                tmp[31] = '\0';
+                if (val == 0) tmp[i--] = '0';
+                while (val > 0) { tmp[i--] = hex[val & 0xf]; val >>= 4; }
+                const char *s = &tmp[i + 1];
+                int len = 30 - i;
+                for (int p = len; p < width; p++) PUT(zero_pad ? '0' : ' ');
+                while (*s) PUT(*s++);
+                break;
+            }
+            case 's': {
+                const char *s = __builtin_va_arg(ap, const char *);
+                if (!s) s = "(null)";
+                int len = 0;
+                const char *t = s;
+                while (*t++) len++;
+                for (int p = len; p < width; p++) PUT(' ');
+                while (*s) PUT(*s++);
+                break;
+            }
+            case 'c': {
+                char c = (char)__builtin_va_arg(ap, int);
+                PUT(c);
+                break;
+            }
+            case 'p': {
+                unsigned long val = __builtin_va_arg(ap, unsigned long);
+                PUT('0'); PUT('x');
+                char tmp[32];
+                int i = 30;
+                tmp[31] = '\0';
+                if (val == 0) tmp[i--] = '0';
+                while (val > 0) { tmp[i--] = "0123456789abcdef"[val & 0xf]; val >>= 4; }
+                const char *s = &tmp[i + 1];
+                while (*s) PUT(*s++);
+                break;
+            }
+            case '%': PUT('%'); break;
+            default:  PUT('?'); break;
+        }
+    }
+
+#undef PUT
+    buf[pos] = '\0';
+    return pos;
 }
 
-static inline void print_num(uint64_t num) {
-    char buf[32];
-    int i = 30;
-    buf[31] = '\0';
-    
-    if (num == 0) {
-        print_str("0");
-        return;
-    }
-    
-    while (num > 0 && i >= 0) {
-        buf[i--] = '0' + (num % 10);
-        num /= 10;
-    }
-    
-    print_str(&buf[i + 1]);
+static inline void printf(const char *fmt, ...) {
+    char buf[1024];
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmt);
+    int len = vsnprintf_simple(buf, sizeof(buf), fmt, ap);
+    __builtin_va_end(ap);
+    sys_print(buf, len);
 }

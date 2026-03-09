@@ -1,6 +1,10 @@
-use core::sync::atomic::{AtomicU64, Ordering};
-
-use crate::arch::amd64::{ipc::{IpcError, message::FastMessage}, scheduler::task::{TaskIdIndex}};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::cell::UnsafeCell;
+use crate::arch::amd64::{
+    ipc::IpcError,
+    ipc::message::FastMessage,
+    scheduler::task::TaskIdIndex,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
@@ -9,118 +13,163 @@ pub struct EndpointId(pub u64);
 static NEXT_EP_ID: AtomicU64 = AtomicU64::new(1);
 
 impl EndpointId {
-    pub fn alloc() -> Self {
-        EndpointId(NEXT_EP_ID.fetch_add(1, Ordering::Relaxed))
-    }
-
-    pub fn new(id: u64) -> Self {
-        EndpointId(id)
-    }
+    pub fn alloc() -> Self { EndpointId(NEXT_EP_ID.fetch_add(1, Ordering::Relaxed)) }
+    pub fn new(id: u64) -> Self { EndpointId(id) }
 }
 
-#[derive(Clone)]
-pub enum IpcState {
-    Running,
-    BlockedOnSend(FastMessage),
-    BlockedOnRecv,
-    BlockedOnReply,
+const WQ_CAP: usize = 16;
+
+struct WaitQueueInner {
+    buf:   [Option<TaskIdIndex>; WQ_CAP],
+    head:  usize,
+    tail:  usize,
+    count: usize,
 }
 
-#[derive(Clone)]
-pub struct PendingSend {
-    pub task_id: TaskIdIndex,
-    pub message:   FastMessage,
+struct WaitQueue {
+    lock:  AtomicBool,
+    inner: UnsafeCell<WaitQueueInner>,
+}
+
+unsafe impl Sync for WaitQueue {}
+
+impl WaitQueue {
+    const fn new() -> Self {
+        Self {
+            lock: AtomicBool::new(false),
+            inner: UnsafeCell::new(WaitQueueInner {
+                buf:   [None; WQ_CAP],
+                head:  0,
+                tail:  0,
+                count: 0,
+            }),
+        }
+    }
+
+    fn acquire(&self) {
+        while self.lock
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+    }
+
+    fn release(&self) {
+        self.lock.store(false, Ordering::Release);
+    }
+
+    fn inner(&self) -> &mut WaitQueueInner {
+        unsafe { &mut *self.inner.get() }
+    }
+
+    fn enqueue(&self, id: TaskIdIndex) -> bool {
+        self.acquire();
+        let ok =  {
+            let q = self.inner();
+            if q.count < WQ_CAP {
+                q.buf[q.tail] = Some(id);
+                q.tail  = (q.tail + 1) % WQ_CAP;
+                q.count += 1;
+                true
+            } else {
+                false
+            }
+        };
+        self.release();
+        ok
+    }
+
+    fn dequeue(&self) -> Option<TaskIdIndex> {
+        self.acquire();
+        let result = {
+            let q = self.inner();
+            loop {
+                if q.count == 0 { break None; }
+                let id = q.buf[q.head].take();
+                q.head  = (q.head + 1) % WQ_CAP;
+                q.count -= 1;
+                if id.is_some() { break id; }
+            }
+        };
+        self.release();
+        result
+    }
+
+    fn cancel(&self, id: TaskIdIndex) -> bool {
+        self.acquire();
+        let found = {
+            let q = self.inner();
+            let mut i = q.head;
+            let mut found = false;
+            for _ in 0..q.count {
+                if q.buf[i] == Some(id) {
+                    q.buf[i] = None;
+                    found = true;
+                    break;
+                }
+                i = (i + 1) % WQ_CAP;
+            }
+            found
+        };
+        self.release();
+        found
+    }
+
+    fn is_empty(&self) -> bool {
+        unsafe { (*self.inner.get()).count == 0 }
+    }
 }
 
 pub struct Endpoint {
-    pub id: EndpointId,
-
-    send_queue: [Option<PendingSend>; 16],
-    send_head:  usize,
-    send_tail:  usize,
-    send_count: usize,
-
-    receiver: Option<TaskIdIndex>,
-
-    closed: bool,
+    pub id:     EndpointId,
+    recv_queue: WaitQueue,
+    closed:     bool,
 }
 
 impl Endpoint {
-    pub const QUEUE_SIZE: usize = 16;
-
     pub fn new() -> Self {
-        Endpoint {
+        Self {
             id:         EndpointId::alloc(),
-            send_queue: [const { None }; 16],
-            send_head:  0,
-            send_tail:  0,
-            send_count: 0,
-            receiver:   None,
+            recv_queue: WaitQueue::new(),
             closed:     false,
         }
     }
 
-    pub fn close(&mut self) {
-        self.closed = true;
+    pub fn new_with_id(id: EndpointId) -> Self {
+        Self {
+            id:         id,
+            recv_queue: WaitQueue::new(),
+            closed:     false,
+        }
     }
 
-    pub fn is_closed(&self) -> bool {
-        self.closed
-    }
+    pub fn close(&mut self)         { self.closed = true; }
+    pub fn is_closed(&self) -> bool { self.closed }
 
-    pub fn try_send(
-        &mut self,
-        sender_id: TaskIdIndex,
-        msg: FastMessage,
-    ) -> Result<Option<TaskIdIndex>, IpcError> {
+    pub fn try_send(&mut self, _msg: FastMessage) -> Result<Option<TaskIdIndex>, IpcError> {
         if self.closed {
             return Err(IpcError::EndpointClosed);
         }
-
-        if let Some(receiver_id) = self.receiver.take() {
-            Ok(Some(receiver_id))
-        } else {
-            if self.send_count >= Self::QUEUE_SIZE {
-                return Err(IpcError::NotReady);
-            }
-            self.send_queue[self.send_tail] = Some(PendingSend {
-                task_id: sender_id,
-                message: msg,
-            });
-            self.send_tail = (self.send_tail + 1) % Self::QUEUE_SIZE;
-            self.send_count += 1;
-            Ok(None)
-        }
+        Ok(self.recv_queue.dequeue())
     }
 
-    pub fn try_recv(
-        &mut self,
-        receiver_id: TaskIdIndex,
-    ) -> Result<Option<PendingSend>, IpcError> {
+    pub fn try_recv(&mut self, receiver_id: TaskIdIndex) -> Result<(), IpcError> {
         if self.closed {
             return Err(IpcError::EndpointClosed);
         }
-
-        if self.send_count > 0 {
-            let pending = self.send_queue[self.send_head].take().unwrap();
-            self.send_head = (self.send_head + 1) % Self::QUEUE_SIZE;
-            self.send_count -= 1;
-            Ok(Some(pending))
+        if self.recv_queue.enqueue(receiver_id) {
+            Ok(())
         } else {
-            self.receiver = Some(receiver_id);
-            Ok(None)
+            Err(IpcError::NotReady) 
         }
     }
 
-    pub fn cancel_recv(&mut self) -> Option<TaskIdIndex> {
-        self.receiver.take()
+    pub fn cancel_recv(&mut self, id: TaskIdIndex) -> bool {
+        self.recv_queue.cancel(id)
     }
 
-    pub fn has_pending_senders(&self) -> bool {
-        self.send_count > 0
-    }
-
-    pub fn has_receiver(&self) -> bool {
-        self.receiver.is_some()
+    pub fn has_waiting_receiver(&self) -> bool {
+        !self.recv_queue.is_empty()
     }
 }

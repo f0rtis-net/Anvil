@@ -1,7 +1,7 @@
-use core::{arch::asm, cell::UnsafeCell, ptr::null_mut, sync::atomic::{AtomicU64, Ordering}};
+use core::{arch::{naked_asm}, cell::UnsafeCell, ptr::null_mut, sync::atomic::{AtomicU64, Ordering}};
 use alloc::{sync::Arc, vec::Vec};
 use spin::Once;
-use x86_64::{PhysAddr, instructions::hlt, registers::{control::{Cr3, Cr3Flags}}, structures::paging::PhysFrame};
+use x86_64::{PhysAddr, instructions::{hlt}};
 
 pub mod task;
 mod stack;
@@ -14,7 +14,7 @@ mod syscall_handler;
 
 use crate::{
     arch::amd64::{
-        apic::{PercpuLapic, start_timer}, cpu::{frames::InterruptFrame, hlt_loop}, ipc::message::FastMessage, scheduler::{cpu_local::ExecCpu, exec_loader::{make_kernel_task, make_user_task}, syscall_handler::{init_syscall_subsystem, set_per_cpu_TOP_OF_KERNEL_STACK}, task::{Task, TaskId, TaskIdIndex, TaskRegisters, TaskState}, task_storage::{add_task_to_execute, get_task, get_task_by_index, inject_sleeping_task, initialize_task_storage, steal_injected}}
+        apic::{PercpuLapic, start_timer}, cpu::{frames::InterruptFrame, hlt_loop}, scheduler::{cpu_local::ExecCpu, exec_loader::{make_kernel_task, make_user_task}, syscall_handler::{init_syscall_subsystem, set_per_cpu_TOP_OF_KERNEL_STACK}, task::{Task, TaskId, TaskRegisters, TaskState}, task_storage::{add_task_to_execute, initialize_task_storage, steal_from_global}}
     }, define_per_cpu_struct, define_per_cpu_u32, early_println, irq, isr
 };
 
@@ -81,23 +81,22 @@ define_per_cpu_struct! {
     }
 }
 
-define_per_cpu_u32!(pub(crate) CURR_TASK_ID);
+define_per_cpu_u32!(pub CURR_TASK_ID);
 
 pub fn init_scheduler(n_cpus: usize) {
     SCHEDULER.call_once(|| Scheduler::new(n_cpus));
 
     let server = make_user_task(SERVER, 1).unwrap();
-    add_task_to_execute(server).unwrap();
+    add_task_to_execute(server);
 
     let client = make_user_task(CLIENT, 2).unwrap();
-    add_task_to_execute(client).unwrap();
+    add_task_to_execute(client);
 }  
 
 extern "C" fn idle_task() -> ! {
     const STEAL_BATCH: usize = 4;
-
-    let mut inj_buf:   [Option<TaskId>;    STEAL_BATCH] = [None; STEAL_BATCH];
-    let mut steal_buf: [Option<Arc<Task>>; STEAL_BATCH] = [None, None, None, None];
+    let mut global_buf: [Option<Arc<Task>>; STEAL_BATCH] = [None, None, None, None];
+    let mut steal_buf:  [Option<Arc<Task>>; STEAL_BATCH] = [None, None, None, None];
 
     loop {
         let percpu_data = PerCpuSchedulerData::get_mut();
@@ -106,29 +105,22 @@ extern "C" fn idle_task() -> ! {
 
         percpu_data.in_rescheduling = true;
 
-        let n = steal_injected(&mut inj_buf);
-        if n > 0 {
-            for slot in inj_buf[..n].iter_mut() {
-                if let Some(task_id) = slot.take() {
-                    if let Some(task) = get_task(task_id) {
-                        cpu.tasks.push(task);
-                    }
-                }
+        let n = steal_from_global(&mut global_buf);
+        for slot in global_buf[..n].iter_mut() {
+            if let Some(task) = slot.take() {
+                cpu.tasks.push(task);
             }
         }
 
         let n = scheduler.try_to_steal_into(percpu_data.cpu_idx, &mut steal_buf);
-        if n > 0 {
-            for slot in steal_buf[..n].iter_mut() {
-                if let Some(task) = slot.take() {
-                    cpu.tasks.push(task);
-                }
+        for slot in steal_buf[..n].iter_mut() {
+            if let Some(task) = slot.take() {
+                cpu.tasks.push(task);
             }
         }
 
         if let Some(next) = cpu.tasks.pop() {
             percpu_data.in_rescheduling = false;
-
             unsafe {
                 let next_ptr = Arc::into_raw(next) as *mut Task;
                 (*next_ptr).task_state = TaskState::Running;
@@ -154,9 +146,8 @@ pub fn start_scheduler_percpu()  {
     init_syscall_subsystem();
     
     let scheduler = SCHEDULER.get().unwrap();
-    PerCpuSchedulerData::get_mut().in_rescheduling = true;
     start_timer(&PercpuLapic::get().lapic); 
-    force_task_context(scheduler.cpu(cpu_id).idle_task.page_table, &scheduler.cpu(cpu_id).idle_task.regs_mut());
+    unsafe { force_task_context(scheduler.cpu(cpu_id).idle_task.page_table, &scheduler.cpu(cpu_id).idle_task.regs_mut()); }
 }
 
 fn scheduler_tick(frame: &InterruptFrame) {
@@ -170,7 +161,6 @@ fn scheduler_tick(frame: &InterruptFrame) {
 
     let curr_task = cpu.get_curr_task();
     let next_task = cpu.tasks.pop();
-
 
     unsafe {
         match (curr_task.is_null(), next_task) {
@@ -193,27 +183,21 @@ fn scheduler_tick(frame: &InterruptFrame) {
             // Task -> Idle
             (false, None) => {
                 (*curr_task).regs_mut().save_from_interrupt(frame);
+                set_per_cpu_TOP_OF_KERNEL_STACK((*curr_task).kernel_stack.top.as_u64()); 
                 cpu.set_curr_task(null_mut());
                 cpu.tasks.push(Arc::from_raw(curr_task));
                 set_per_cpu_CURR_TASK_ID(cpu.idle_task.id.id());
-                force_task_context(cpu.idle_task.page_table,cpu.idle_task.regs_mut());
+                force_task_context(cpu.idle_task.page_table, cpu.idle_task.regs_mut());
             }
             // Task -> Task
             (false, Some(next)) => {
                 (*curr_task).regs_mut().save_from_interrupt(frame);
                 (*curr_task).task_state = TaskState::Ready;
-
-                // Reconstruct Arc from the raw pointer we stored when we switched
-                // to this task (refcount = 1, no clone needed).
                 let curr_arc = Arc::from_raw(curr_task);
-
                 let next_ptr = Arc::into_raw(next) as *mut Task;
                 (*next_ptr).task_state = TaskState::Running;
                 cpu.set_curr_task(next_ptr);
-
-                // Transfer ownership of curr back into the queue (refcount stays 1).
                 cpu.tasks.push(curr_arc);
-
                 set_per_cpu_CURR_TASK_ID((*next_ptr).id.id());
                 set_per_cpu_TOP_OF_KERNEL_STACK((*next_ptr).kernel_stack.top.as_u64());
                 force_task_context((*next_ptr).page_table, (*next_ptr).regs_mut());
@@ -223,19 +207,28 @@ fn scheduler_tick(frame: &InterruptFrame) {
 }
 
 
-#[inline(always)]
-pub fn force_task_context(pt_phys_addr: PhysAddr, registers: &TaskRegisters) {
-    unsafe { 
-        let frame = PhysFrame::from_start_address(pt_phys_addr).unwrap();
-        Cr3::write(frame, Cr3Flags::empty()); 
-    }
-
-    unsafe {
-        asm!("mov rsp, {};\
-            pop rbp; pop rax; pop rbx; pop rcx; pop rdx; pop rsi; pop rdi; pop r8; pop r9;\
-            pop r10; pop r11; pop r12; pop r13; pop r14; pop r15; iretq;",
-            in(reg) registers)
-    }
+#[unsafe(naked)]
+pub unsafe extern "C" fn force_task_context(pt_phys_addr: PhysAddr, registers: &TaskRegisters) {
+    naked_asm!(
+        "mov cr3, rdi",   
+        "mov rsp, rsi",   
+        "pop rbp",
+        "pop rax",
+        "pop rbx",
+        "pop rcx",
+        "pop rdx",
+        "pop rsi",
+        "pop rdi",
+        "pop r8",
+        "pop r9",
+        "pop r10",
+        "pop r11",
+        "pop r12",
+        "pop r13",
+        "pop r14",
+        "pop r15",
+        "iretq",
+    )
 }
 
 pub(super) fn block_current_ipc(regs: &TaskRegisters) -> ! {
@@ -245,54 +238,22 @@ pub(super) fn block_current_ipc(regs: &TaskRegisters) -> ! {
     unsafe {
         let curr_ptr = cpu.get_curr_task();
 
-        if !curr_ptr.is_null() {
-            *(*curr_ptr).regs_mut() = *regs;
-            (*curr_ptr).task_state  = TaskState::Sleep;
+        *(*curr_ptr).regs_mut() = *regs;
+        (*curr_ptr).task_state  = TaskState::Sleep;
 
-            cpu.set_curr_task(core::ptr::null_mut());
+        set_per_cpu_CURR_TASK_ID(cpu.idle_task.id.id());
 
-            drop(alloc::sync::Arc::from_raw(curr_ptr));
-        }
+        cpu.set_curr_task(core::ptr::null_mut());
 
-        match cpu.tasks.pop() {
-            Some(next) => {
-                let next_ptr = alloc::sync::Arc::into_raw(next) as *mut Task;
-                (*next_ptr).task_state = TaskState::Running;
-                cpu.set_curr_task(next_ptr);
-                set_per_cpu_CURR_TASK_ID((*next_ptr).id.id());
-                set_per_cpu_TOP_OF_KERNEL_STACK((*next_ptr).kernel_stack.top.as_u64());
-                force_task_context((*next_ptr).page_table, (*next_ptr).regs_mut());
-            }
-            None => {
-                cpu.set_curr_task(core::ptr::null_mut());
-                set_per_cpu_CURR_TASK_ID(cpu.idle_task.id.id());
-                force_task_context(cpu.idle_task.page_table, cpu.idle_task.regs_mut());
-            }
-        }
-    }
+        core::arch::asm!("swapgs", options(nostack, nomem));
 
-    loop { x86_64::instructions::hlt() }
-}
+        force_task_context(cpu.idle_task.page_table, cpu.idle_task.regs_mut());
+    };
 
-pub(super) fn direct_transfer_ipc(receiver_idx: TaskIdIndex, msg: &FastMessage) {
-    if let Some(task) = get_task_by_index(receiver_idx) {
-        let regs    = task.regs_mut();
-        regs.r9     = 0;              
-        regs.rdi    = msg.label.0;    
-        regs.rsi    = msg.data[0];
-        regs.rdx    = msg.data[1];
-        regs.r10    = msg.data[2];
-        regs.r8     = msg.data[3];
-    }
-    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
-    inject_sleeping_task(receiver_idx);
+    hlt_loop()
 }
 
 irq!(0x30, scheduler_tick_irq, |stack| {
-    if !PercpuLapic::get().lapic.is_initialized() {
-        return;
-    }
-
     PercpuLapic::get().lapic.eoi();
     scheduler_tick(&stack);
 });

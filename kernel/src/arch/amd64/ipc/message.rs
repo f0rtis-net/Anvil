@@ -88,6 +88,17 @@ pub struct FastMessage {
     pub n_caps: usize,
 }
 
+impl Default for FastMessage {
+    fn default() -> Self {
+        FastMessage {
+            label: MsgLabel::INVALID,
+            data:  [0u64; MSG_DATA_WORDS],
+            caps:  [Capability::NULL; MAX_CAPS_PER_MSG],
+            n_caps: 0,
+        }
+    }
+}
+
 impl FastMessage {
     pub const fn empty(label: MsgLabel) -> Self {
         FastMessage {

@@ -1,6 +1,12 @@
 use spin::Mutex;
-
-use crate::arch::amd64::{ipc::{endpoint::{Endpoint, EndpointId, PendingSend}, message::{Capability, FastMessage, Rights}, notification::Notification}, scheduler::task::TaskIdIndex};
+use crate::{arch::amd64::{
+    ipc::{
+        endpoint::{Endpoint, EndpointId},
+        message::{Capability, FastMessage, Rights},
+        notification::Notification,
+    },
+    scheduler::task::TaskIdIndex,
+}, early_println};
 
 pub mod endpoint;
 pub mod message;
@@ -8,39 +14,39 @@ pub mod notification;
 
 pub static IPC_MANAGER: Mutex<IpcManager> = Mutex::new(IpcManager::new());
 
-const MAX_ENDPOINTS: usize = 256;
+const MAX_ENDPOINTS:     usize = 256;
 const MAX_NOTIFICATIONS: usize = 256;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u64)]
 pub enum IpcError {
-    InvalidEndpoint  = 1,
-    NoPermission     = 2,
-    NotReady         = 3,
-    Blocked          = 4,
-    NoGrant          = 5,
-    TooManyCaps      = 6,
-    EndpointClosed   = 7,
-    Timeout          = 8,
+    InvalidEndpoint = 1,
+    NoPermission    = 2,
+    NotReady        = 3,
+    Blocked         = 4,
+    NoGrant         = 5,
+    TooManyCaps     = 6,
+    EndpointClosed  = 7,
+    Timeout         = 8,
 }
 
 pub struct EndpointTable {
-    endpoints:     [Option<Endpoint>; MAX_ENDPOINTS],
+    endpoints:     [Option<Endpoint>;     MAX_ENDPOINTS],
     notifications: [Option<Notification>; MAX_NOTIFICATIONS],
 }
 
 impl EndpointTable {
     pub const fn new() -> Self {
-        EndpointTable {
+        Self {
             endpoints:     [const { None }; MAX_ENDPOINTS],
             notifications: [const { None }; MAX_NOTIFICATIONS],
         }
     }
 
-    pub fn create_endpoint(&mut self) -> Option<EndpointId> {
-        for (i, slot) in self.endpoints.iter_mut().enumerate() {
+    pub fn create_endpoint(&mut self, task_id: TaskIdIndex) -> Option<EndpointId> {
+        for slot in self.endpoints.iter_mut() {
             if slot.is_none() {
-                let ep = Endpoint::new();
+                let ep = Endpoint::new_with_id(EndpointId::new(task_id as u64));
                 let id = ep.id;
                 *slot = Some(ep);
                 return Some(id);
@@ -69,17 +75,10 @@ impl EndpointTable {
 }
 
 pub enum IpcResult {
-    DirectTransfer {
-        receiver: TaskIdIndex,
-        message:  FastMessage,
-    },
-    WakeSender {
-        sender:  TaskIdIndex,
-        message: FastMessage,
-    },
+    WakeReceiver { receiver: TaskIdIndex, message: FastMessage },
     BlockCurrent,
+    NotReady,
     Done,
-
     Error(IpcError),
 }
 
@@ -89,84 +88,54 @@ pub struct IpcManager {
 
 impl IpcManager {
     pub const fn new() -> Self {
-        IpcManager {
-            table: EndpointTable::new(),
-        }
+        IpcManager { table: EndpointTable::new() }
     }
 
-    pub fn create_endpoint(&mut self) -> Option<EndpointId> {
-        self.table.create_endpoint()
+    pub fn create_endpoint(&mut self, task_id: TaskIdIndex) -> Option<EndpointId> {
+        self.table.create_endpoint(task_id)
     }
 
     pub fn handle_send(
         &mut self,
         sender_id: TaskIdIndex,
-        ep_id: EndpointId,
-        msg: FastMessage,
+        ep_id:     EndpointId,
+        msg:       FastMessage,
     ) -> IpcResult {
         let ep = match self.table.get_endpoint(ep_id) {
             Some(ep) => ep,
-            None => return IpcResult::Error(IpcError::InvalidEndpoint),
+            None     => return IpcResult::Error(IpcError::InvalidEndpoint),
         };
 
-        match ep.try_send(sender_id, msg) {
-            Ok(Some(receiver_id)) => {
-                IpcResult::DirectTransfer {
-                    receiver: receiver_id,
-                    message:  msg,
-                }
-            }
-            Ok(None) => {
-                IpcResult::BlockCurrent
-            }
-            Err(e) => IpcResult::Error(e),
+        match ep.try_send(msg.clone()) {
+            Ok(Some(receiver)) => IpcResult::WakeReceiver { receiver, message: msg },
+            Ok(None)           => IpcResult::NotReady,
+            Err(e)             => IpcResult::Error(e),
         }
     }
 
     pub fn handle_recv(
         &mut self,
         receiver_id: TaskIdIndex,
-        ep_id: EndpointId,
+        ep_id:       EndpointId,
     ) -> IpcResult {
         let ep = match self.table.get_endpoint(ep_id) {
             Some(ep) => ep,
-            None => return IpcResult::Error(IpcError::InvalidEndpoint),
+            None     => return IpcResult::Error(IpcError::InvalidEndpoint),
         };
 
         match ep.try_recv(receiver_id) {
-            Ok(Some(PendingSend { task_id: sender_id, message })) => {
-                IpcResult::WakeSender { sender: sender_id, message }
-            }
-            Ok(None) => {
-                IpcResult::BlockCurrent
-            }
-            Err(e) => IpcResult::Error(e),
+            Ok(())  => IpcResult::BlockCurrent,
+            Err(e)  => IpcResult::Error(e),
         }
     }
 
     pub fn handle_call(
         &mut self,
         caller_id: TaskIdIndex,
-        ep_id: EndpointId,
-        msg: FastMessage,
+        ep_id:     EndpointId,
+        msg:       FastMessage,
     ) -> IpcResult {
-        let ep = match self.table.get_endpoint(ep_id) {
-            Some(ep) => ep,
-            None => return IpcResult::Error(IpcError::InvalidEndpoint),
-        };
-
-        match ep.try_send(caller_id, msg) {
-            Ok(Some(receiver_id)) => {
-                IpcResult::DirectTransfer {
-                    receiver: receiver_id,
-                    message:  msg,
-                }
-            }
-            Ok(None) => {
-                IpcResult::BlockCurrent
-            }
-            Err(e) => IpcResult::Error(e),
-        }
+        self.handle_send(caller_id, ep_id, msg)
     }
 
     pub fn handle_reply(
@@ -174,7 +143,7 @@ impl IpcManager {
         caller_id: TaskIdIndex,
         reply_msg: FastMessage,
     ) -> IpcResult {
-        IpcResult::DirectTransfer {
+        IpcResult::WakeReceiver {
             receiver: caller_id,
             message:  reply_msg,
         }
@@ -182,16 +151,12 @@ impl IpcManager {
 
     pub fn validate_caps(
         &self,
-        msg: &FastMessage,
+        msg:         &FastMessage,
         sender_caps: &[Capability],
     ) -> Result<(), IpcError> {
         for cap in msg.caps() {
-            if cap.is_null() {
-                continue;
-            }
-            let owned = sender_caps.iter()
-                .find(|c| c.object == cap.object);
-
+            if cap.is_null() { continue; }
+            let owned = sender_caps.iter().find(|c| c.object == cap.object);
             match owned {
                 None => return Err(IpcError::NoPermission),
                 Some(owned_cap) => {

@@ -1,8 +1,8 @@
-use core::cell::UnsafeCell;
+use core::{cell::UnsafeCell, ptr::NonNull};
 
 use x86_64::PhysAddr;
 
-use crate::{arch::amd64::{cpu::frames::InterruptFrame, scheduler::{addr_space::AddrSpace, stack::KernelStack}}};
+use crate::arch::amd64::{cpu::frames::InterruptFrame, scheduler::{addr_space::AddrSpace, stack::KernelStack}};
 
 pub type TaskIdIndex = u32;
 pub type TaskGen = u32;
@@ -44,7 +44,7 @@ pub struct Task {
     pub registers: UnsafeCell<TaskRegisters>,
     pub page_table: PhysAddr,
     pub addr_space: Option<AddrSpace>,
-    pub task_state: TaskState
+    pub task_state: TaskState,
 }
 
 unsafe impl Sync for Task {}
@@ -98,7 +98,6 @@ impl TaskRegisters {
         self.r13 = frame.r13;
         self.r14 = frame.r14;
         self.r15 = frame.r15;
-
         self.rip = frame.rip;
         self.cs = frame.cs;
         self.rflags = frame.rflags;

@@ -4,29 +4,30 @@
 __attribute__((noreturn))
 void _start(void) {
     long client_ep = ipc_ep_create();
-    print_str("Client: created ep_endpoint. Ep num: ");
-    print_num(client_ep);
-    print_str("\n");
+    printf("Client: created ep_endpoint. Ep num: %u\n", client_ep);
 
     long server_ep = 1; 
 
-    /*for (int i = 1; i <= 5; i++) {
-        uint64_t result = ipc_send(
+    for (int i = 1; i <= 5; i++) {
+        while(1) {
+            uint64_t result = ipc_send(
             server_ep,
             (uint64_t)1337,
             (uint64_t)client_ep,  
             (uint64_t)(i * 2),
             0xCAFEBABE
-        );
+            );
 
-        if (result == 0) {
-            print_str("Client: Message ");
-            print_num(i);
-            print_str(" sent to server\n");
-        } else {
-            print_str("Client: Failed to send message ");
-            print_num(i);
-            print_str("\n");
+            if (result == 0) {
+                printf("Client: Message %d sent to server\n", i);
+                break;
+            } else if (result == 1) {
+                printf("Client: Failed to send message %d. Invalid endpoint\n", i);
+                break;
+            } else if (result == 17) {
+                printf("Client: Server is not ready, retrying...\n");
+                continue; 
+            }
         }
 
         ipc_msg_t reply;
@@ -34,11 +35,9 @@ void _start(void) {
             spin_pause();
         }
 
-        print_str("Client: Got reply for message ");
-        print_num(i);
-        print_str("\n");
+        printf("Client: Got reply for message %d\n", i);
     }
 
-    print_str("Client: All messages sent and replied\n");*/
+    printf("Client: All messages sent and replied\n");
     for (;;) { spin_pause(); }
 }

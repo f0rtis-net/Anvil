@@ -1,8 +1,9 @@
 use core::arch::naked_asm;
 
+use spin::Mutex;
 use x86_64::{VirtAddr, registers::{control::{Efer, EferFlags}, model_specific::{LStar, SFMask}, rflags::RFlags}};
 
-use crate::{arch::amd64::{gdt::{USER_CODE_SELECTOR, USER_DATA_SELECTOR}, ipc::{IPC_MANAGER, IpcResult, endpoint::EndpointId, message::{FastMessage, MsgLabel}}, scheduler::{block_current_ipc, direct_transfer_ipc, get_per_cpu_no_guard_CURR_TASK_ID, task::TaskRegisters, task_storage::inject_sleeping_task}}, define_per_cpu_u64, early_print, early_println, irq};
+use crate::{arch::amd64::{gdt::{USER_CODE_SELECTOR, USER_DATA_SELECTOR}, ipc::{IPC_MANAGER, IpcError, IpcResult, endpoint::EndpointId, message::{FastMessage, MsgLabel}}, scheduler::{block_current_ipc, get_per_cpu_no_guard_CURR_TASK_ID, task::TaskRegisters, task_storage::{get_task_by_index, inject_sleeping_task}}}, define_per_cpu_u64, early_print, early_println};
 
 struct IpcSyscallArguments {
     ep_id: u64,
@@ -27,12 +28,13 @@ enum IpcSyscallNums {
     IPC_EP_DESTROY = 0x65,
 }
 
-/// Returns the IPC error code (0 = ok, 1 = error) for normal (sysretq) returns.
-/// For BlockCurrent the function diverges and never returns to the caller.
+static LOCK: Mutex<()> = Mutex::new(());
+
 fn syscall_dispatcher(registers: &mut TaskRegisters, args: &SyscallArguments) -> u64 {
     let curr_task_id = get_per_cpu_no_guard_CURR_TASK_ID();
 
     if args.syscall_number == 0x10 {
+        let _guard = LOCK.lock();
         let ptr = args.arg1 as *const u8;
         let len = args.arg2 as usize;
 
@@ -49,13 +51,12 @@ fn syscall_dispatcher(registers: &mut TaskRegisters, args: &SyscallArguments) ->
             if byte == 0 { break; }
             early_print!("{}", byte as char);
         }
-
         return 0;
     }
 
     match args.syscall_number {
         x if x == IpcSyscallNums::IPC_EP_CREATE as u64 => {
-            let ep_id = IPC_MANAGER.lock().create_endpoint().unwrap().0;
+            let ep_id = IPC_MANAGER.lock().create_endpoint(get_per_cpu_no_guard_CURR_TASK_ID()).unwrap().0;
             return ep_id;
         },
 
@@ -64,25 +65,41 @@ fn syscall_dispatcher(registers: &mut TaskRegisters, args: &SyscallArguments) ->
                 ep_id: args.arg1,
                 msg: [args.arg2, args.arg3, args.arg4, args.arg5],
             };
-            let msg    = FastMessage::with_data(MsgLabel::NOTIFY, ipc.msg);
-            let result = IPC_MANAGER.lock().handle_send(
-                curr_task_id,
-                EndpointId::new(ipc.ep_id),
-                msg,
-            );
+            let msg = FastMessage::with_data(MsgLabel::NOTIFY, ipc.msg);
+
+             let result = {
+                let mut mgr = IPC_MANAGER.lock();
+                mgr.handle_send(curr_task_id, EndpointId::new(ipc.ep_id), msg)
+            }; 
 
             match result {
-                IpcResult::DirectTransfer { receiver, message } => {
-                    direct_transfer_ipc(receiver, &message);
+                IpcResult::WakeReceiver { receiver, message } => {
+                    if let Some(task) = get_task_by_index(receiver) {
+                        let regs = task.regs_mut();
+                        regs.rdi = message.label.0;
+                        regs.rsi = message.data[0];
+                        regs.rdx = message.data[1];
+                        regs.r10 = message.data[2];
+                        regs.r8  = message.data[3];
+                        regs.r9  = 0; 
+                    }
+                    inject_sleeping_task(receiver);
                     return 0;
                 }
 
-                IpcResult::BlockCurrent => {
-                    registers.r9 = 0;
-                    block_current_ipc(registers);
+                IpcResult::NotReady => {
+                    return 17; 
                 }
 
-                IpcResult::Error(_) => return 1,
+                IpcResult::Error(err) => match err {
+                    IpcError::InvalidEndpoint => {
+                        return 1;
+                    }
+
+                    _ => {
+                        return 10;
+                    }
+                },
                 _ => return 0,
             }
         },
@@ -92,27 +109,17 @@ fn syscall_dispatcher(registers: &mut TaskRegisters, args: &SyscallArguments) ->
                 ep_id: args.arg1,
                 msg: [args.arg2, args.arg3, args.arg4, args.arg5],
             };
+
             let result = IPC_MANAGER.lock().handle_recv(
                 curr_task_id,
                 EndpointId::new(ipc.ep_id),
             );
 
             match result {
-                IpcResult::WakeSender { sender, message } => {
-                    registers.rdi = message.label.0;
-                    registers.rsi = message.data[0];
-                    registers.rdx = message.data[1];
-                    registers.r10 = message.data[2];
-                    registers.r8  = message.data[3];
-                    inject_sleeping_task(sender);
-                    return 0;
-                }
-
                 IpcResult::BlockCurrent => {
-                    registers.r9 = 0;
+                    early_println!("Blocking receiver {} on endpoint {}", curr_task_id, ipc.ep_id);
                     block_current_ipc(registers);
                 }
-
                 IpcResult::Error(_) => return 1,
                 _ => return 0,
             }
@@ -136,7 +143,7 @@ pub fn init_syscall_subsystem() {
 
     SFMask::write(RFlags::INTERRUPT_FLAG);
 
-    let syscall_handler_addr = VirtAddr::new(syscall_handler as usize as u64);
+    let syscall_handler_addr = VirtAddr::new(syscall_handler as u64);
     LStar::write(syscall_handler_addr);
 }
 
@@ -226,7 +233,5 @@ extern "C" fn syscall_handler_inner(registers: &mut TaskRegisters) {
         arg5: registers.r8,
     };
 
-    // syscall_dispatcher either returns a u64 result code (normal sysretq path)
-    // or diverges via block_current_ipc (context-switch path).
     registers.r9 = syscall_dispatcher(registers, &args);
 }
