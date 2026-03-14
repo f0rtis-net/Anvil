@@ -57,11 +57,10 @@ pub fn initialize_task_storage() {
     GLOBAL_RUN_QUEUE.call_once(|| GlobalRunQueue::new());
 }
 
-pub fn add_task_to_execute(task: Task) -> TaskId {
+pub fn add_task_to_execute(task: Arc<Task>) -> TaskId {
     let id = task.id;
-    let arc = Arc::new(task);
-    table().insert(arc.clone());
-    global_queue().push(arc);
+    table().insert(task.clone());
+    global_queue().push(task);
     id
 }
 

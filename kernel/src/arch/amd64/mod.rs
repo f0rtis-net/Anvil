@@ -61,5 +61,4 @@ pub fn init_arch() {
     early_startup();
     early_println!("Early startup finished! Initializing SMP...");
     smp_startup();
-    early_println!("Amd64 arch fully initialized!");
 }

@@ -1,8 +1,8 @@
-use core::cell::UnsafeCell;
+use core::{arch::naked_asm, cell::UnsafeCell, sync::atomic::AtomicU8};
 
-use x86_64::{PhysAddr, VirtAddr, registers::control::Cr3, structures::paging::{Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB}};
+use x86_64::{PhysAddr, VirtAddr, instructions::interrupts, registers::{control::Cr3, rflags::RFlags}, structures::paging::{Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB}};
 
-use crate::{arch::amd64::{gdt::{KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR, USER_CODE_SELECTOR, USER_DATA_SELECTOR}, memory::{misc::{pages_to_order, phys_to_virt}, pmm::pages_allocator::{PAllocFlags, alloc_pages_by_order}, vmm::{KernelFrameAllocator, PAGE_SIZE, create_new_pt4_from_kernel_pt4, kernel_pt}}, scheduler::{elf::ElfParsed, stack::{DEFAULT_KERNEL_STACK_SIZE, allocate_kernel_stack}, task::{Task, TaskId, TaskIdIndex, TaskRegisters, TaskState}}}, early_println};
+use crate::{arch::amd64::{gdt::{KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR, USER_CODE_SELECTOR, USER_DATA_SELECTOR}, memory::{misc::{pages_to_order, phys_to_virt}, pmm::pages_allocator::{PAllocFlags, alloc_pages_by_order}, vmm::{KernelFrameAllocator, PAGE_SIZE, create_new_pt4_from_kernel_pt4, kernel_pt}}, scheduler::{elf::ElfParsed, stack::{DEFAULT_KERNEL_STACK_SIZE, allocate_kernel_stack}, syscall::TOP_OF_KERNEL_STACK, task::{Task, TaskId, TaskIdIndex, TaskRegisters, TaskState}}}, early_println};
 
 const RFLAGS_WITH_IR: u64 = 0x202;
 const USER_STACK_PAGES_COUNT: usize = 4;
@@ -106,45 +106,79 @@ pub fn make_user_task(bytes: &[u8], task_id: TaskIdIndex) -> Result<Task, &'stat
     
     let kernel_stack = allocate_kernel_stack(DEFAULT_KERNEL_STACK_SIZE);
 
-    let registers = TaskRegisters {
-        rflags: RFLAGS_WITH_IR,
-        cs: USER_CODE_SELECTOR.0 as u64,
-        ss: USER_DATA_SELECTOR.0 as u64,
-        rsp: stack_addr_top - 8, 
-        rip: elf.entrypoint.as_u64(),
-        ..Default::default()
-    };
+    let stack_top_ptr = kernel_stack.top.as_u64() as *mut u64;
+    
+    unsafe {
+        stack_top_ptr.sub(1).write(stack_addr_top - 8);            
+        stack_top_ptr.sub(2).write(elf.entrypoint.as_u64());       
+
+        stack_top_ptr.sub(3).write(user_task_trampoline as u64);   
+
+        for i in 4..=18 {
+            stack_top_ptr.sub(i).write(0);                        
+        }
+    }
+
+    let initial_rsp = unsafe { stack_top_ptr.sub(18) } as u64;
 
     Ok(Task {
         id: TaskId::new(task_id),
         kernel_stack,
-        registers: UnsafeCell::new(registers),
+        registers: UnsafeCell::new(TaskRegisters {
+            rsp: initial_rsp,
+            ..Default::default()
+        }),
         page_table: new_pml4_phys,
         addr_space: None,
-        task_state: TaskState::Ready,
+        task_state: AtomicU8::new(TaskState::Ready as u8),
     })
+}
+
+#[unsafe(naked)]
+unsafe extern "C" fn user_task_trampoline() {
+    naked_asm!(
+        "sti",
+        "pop rcx",
+        "pop rsp",
+        "mov r11, {rflags}",
+        "swapgs",
+        "sysretq",
+        rflags = const RFLAGS_WITH_IR,
+    );
+}
+
+extern "C" fn kernel_task_trampoline(entry: u64) -> ! {
+    interrupts::enable();
+    let func: extern "C" fn() -> ! = unsafe { core::mem::transmute(entry) };
+    func();
 }
 
 pub fn make_kernel_task(id: TaskId, entry_point: u64) -> Task {
     let phys_frame = Cr3::read().0;
-    let phys_add_of_pt = phys_frame.start_address();
+    let phys_addr_of_pt = phys_frame.start_address();
     let kernel_stack = allocate_kernel_stack(DEFAULT_KERNEL_STACK_SIZE);
-    
-    let registers = TaskRegisters {
-        rflags: RFLAGS_WITH_IR,
-        ss: KERNEL_DATA_SELECTOR.0 as u64,
-        cs: KERNEL_CODE_SELECTOR.0 as u64 ,
-        rsp: kernel_stack.top.as_u64(),
-        rip: entry_point,
-        ..Default::default()
-    };
+
+    let stack_top_ptr = kernel_stack.top.as_u64() as *mut u64;
+
+    unsafe {
+        stack_top_ptr.sub(1).write(kernel_task_trampoline as u64);
+        for i in 2..=16 {
+            stack_top_ptr.sub(i).write(0);
+        }
+        stack_top_ptr.sub(8).write(entry_point); 
+    }
+
+    let initial_rsp = unsafe { stack_top_ptr.sub(16) } as u64;
 
     Task {
         id,
         kernel_stack,
-        registers: UnsafeCell::new(registers),
-        page_table: phys_add_of_pt,
+        registers: UnsafeCell::new(TaskRegisters { 
+            rsp: initial_rsp,
+            .. TaskRegisters::default()
+        }),
+        page_table: phys_addr_of_pt,
         addr_space: None,
-        task_state: TaskState::Ready,
+        task_state: AtomicU8::new(TaskState::Ready as u8),
     }
 }

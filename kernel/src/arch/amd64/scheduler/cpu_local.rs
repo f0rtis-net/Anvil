@@ -117,6 +117,12 @@ impl Runqueue {
         }
         stolen
     }
+
+    pub fn len(&self) -> usize {
+        let b = self.bottom.load(Ordering::Relaxed);
+        let t = self.top.load(Ordering::Acquire);
+        b.wrapping_sub(t)
+    }
 }
 
 pub struct ExecCpu {

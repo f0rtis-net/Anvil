@@ -13,6 +13,7 @@ void _start(void) {
     for (;;) {
         ipc_msg_t msg;
 
+        printf("Server: waiting for recv...\n");
         if (ipc_recv_msg((uint64_t)ep_id, &msg) != 0) {
             printf("Server: recv error\n");
             continue;
@@ -30,6 +31,10 @@ void _start(void) {
             printf("Server: reply failed\n");
         }
     }
-   
+
+    printf("Server: destroying ep...\n");
+    ipc_ep_destroy(ep_id);
+    printf("Server: ep destroyed!\n");
+
     for (;;) { spin_pause(); }
 }

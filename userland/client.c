@@ -21,10 +21,7 @@ void _start(void) {
             if (result == 0) {
                 printf("Client: Message %d sent to server\n", i);
                 break;
-            } else if (result == 1) {
-                printf("Client: Failed to send message %d. Invalid endpoint\n", i);
-                break;
-            } else if (result == 17) {
+            } else if (result == 17 || 1) {
                 printf("Client: Server is not ready, retrying...\n");
                 continue; 
             }
@@ -39,5 +36,10 @@ void _start(void) {
     }
 
     printf("Client: All messages sent and replied\n");
+
+    printf("Client: destroying ep...\n");
+    ipc_ep_destroy(client_ep);
+    printf("Client: ep destroyed!\n");
+
     for (;;) { spin_pause(); }
 }

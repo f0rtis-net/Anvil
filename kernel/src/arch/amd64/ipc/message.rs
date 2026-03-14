@@ -75,7 +75,7 @@ impl MsgLabel {
     pub const REPLY_OK:   MsgLabel = MsgLabel(1);
     pub const REPLY_ERR:  MsgLabel = MsgLabel(2);
     pub const NOTIFY:     MsgLabel = MsgLabel(3);
-
+    pub const CALL:       MsgLabel = MsgLabel(4);
     pub const USER_BASE:  MsgLabel = MsgLabel(0x1000);
 }
 

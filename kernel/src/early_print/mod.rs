@@ -6,8 +6,9 @@ macro_rules! early_print {
         use core::fmt::Write;
 
         if let Some(renderer) = $crate::early_print::fb_printer::RENDERER.get() {
-            let mut guard = renderer.lock();
-            let _ = write!(guard, $($arg)*);
+            if let Some(mut guard) = renderer.try_lock() {
+                let _ = write!(guard, $($arg)*);
+            }
         }
     }};
 }

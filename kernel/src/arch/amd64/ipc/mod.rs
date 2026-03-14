@@ -1,3 +1,4 @@
+use alloc::collections::btree_map::BTreeMap;
 use spin::Mutex;
 use crate::{arch::amd64::{
     ipc::{
@@ -75,7 +76,7 @@ impl EndpointTable {
 }
 
 pub enum IpcResult {
-    WakeReceiver { receiver: TaskIdIndex, message: FastMessage },
+    WakeReceiver { receiver: TaskIdIndex },
     BlockCurrent,
     NotReady,
     Done,
@@ -84,15 +85,31 @@ pub enum IpcResult {
 
 pub struct IpcManager {
     pub table: EndpointTable,
+    pending_messages: BTreeMap<u32, FastMessage>,
 }
 
 impl IpcManager {
     pub const fn new() -> Self {
-        IpcManager { table: EndpointTable::new() }
+        IpcManager { 
+            table: EndpointTable::new(),
+            pending_messages: BTreeMap::new()
+        }
     }
 
     pub fn create_endpoint(&mut self, task_id: TaskIdIndex) -> Option<EndpointId> {
         self.table.create_endpoint(task_id)
+    }
+
+    pub fn destroy_endpoint(&mut self, ep_id: EndpointId) {
+        self.table.destroy_endpoint(ep_id);
+    }
+
+    pub fn store_pending_message(&mut self, task_id: u32, msg: FastMessage) {
+        self.pending_messages.insert(task_id, msg);
+    }
+
+    pub fn take_pending_message(&mut self, task_id: u32) -> Option<FastMessage> {
+        self.pending_messages.remove(&task_id)
     }
 
     pub fn handle_send(
@@ -107,7 +124,11 @@ impl IpcManager {
         };
 
         match ep.try_send(msg.clone()) {
-            Ok(Some(receiver)) => IpcResult::WakeReceiver { receiver, message: msg },
+            Ok(Some(receiver)) => {
+                self.store_pending_message(receiver, msg);
+
+                IpcResult::WakeReceiver { receiver }
+            } 
             Ok(None)           => IpcResult::NotReady,
             Err(e)             => IpcResult::Error(e),
         }
@@ -143,9 +164,10 @@ impl IpcManager {
         caller_id: TaskIdIndex,
         reply_msg: FastMessage,
     ) -> IpcResult {
+        self.store_pending_message(caller_id, reply_msg);
+
         IpcResult::WakeReceiver {
-            receiver: caller_id,
-            message:  reply_msg,
+            receiver: caller_id
         }
     }
 

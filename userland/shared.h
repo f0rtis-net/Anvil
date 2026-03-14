@@ -30,80 +30,80 @@ static inline void spin_pause(void) {
 }
 
 static inline uint64_t syscall0(uint64_t number) {
-    register uint64_t r9 asm("r9");
+    uint64_t ret;
     __asm__ volatile (
         "syscall"
-        : "=r"(r9)
+        : "=a"(ret)
         : "a"(number)
-        : "rcx", "r11", "rdi", "rsi", "rdx", "r8", "r10",
+        : "rcx", "r11", "rdi", "rsi", "rdx", "r8", "r9", "r10",
           "r12", "r13", "r14", "r15", "memory"
     );
-    return r9;
+    return ret;
 }
 
 static inline uint64_t syscall1(uint64_t number, uint64_t arg1) {
-    register uint64_t r9 asm("r9");
+    uint64_t ret;
     __asm__ volatile (
         "syscall"
-        : "=r"(r9)
+        : "=a"(ret)
         : "a"(number), "D"(arg1)
-        : "rcx", "r11", "rsi", "rdx", "r8", "r10",
+        : "rcx", "r11", "rsi", "rdx", "r8", "r9", "r10",
           "r12", "r13", "r14", "r15", "memory"
     );
-    return r9;
+    return ret;
 }
 
 static inline uint64_t syscall2(uint64_t number, uint64_t arg1, uint64_t arg2) {
-    register uint64_t r9 asm("r9");
+    uint64_t ret;
     __asm__ volatile (
         "syscall"
-        : "=r"(r9)
+        : "=a"(ret)
         : "a"(number), "D"(arg1), "S"(arg2)
-        : "rcx", "r11", "rdx", "r8", "r10",
+        : "rcx", "r11", "rdx", "r8", "r9", "r10",
           "r12", "r13", "r14", "r15", "memory"
     );
-    return r9;
+    return ret;
 }
 
 static inline uint64_t syscall3(uint64_t number, uint64_t arg1, uint64_t arg2, uint64_t arg3) {
-    register uint64_t r9 asm("r9");
+    uint64_t ret;
     __asm__ volatile (
         "syscall"
-        : "=r"(r9)
+        : "=a"(ret)
         : "a"(number), "D"(arg1), "S"(arg2), "d"(arg3)
-        : "rcx", "r11", "r8", "r10",
+        : "rcx", "r11", "r8", "r9", "r10",
           "r12", "r13", "r14", "r15", "memory"
     );
-    return r9;
+    return ret;
 }
 
-static inline uint64_t syscall4(uint64_t number, uint64_t arg1, uint64_t arg2, 
+static inline uint64_t syscall4(uint64_t number, uint64_t arg1, uint64_t arg2,
                                 uint64_t arg3, uint64_t arg4) {
-    register uint64_t r9 asm("r9");
+    uint64_t ret;
     register uint64_t r10 asm("r10") = arg4;
     __asm__ volatile (
         "syscall"
-        : "=r"(r9)
+        : "=a"(ret)
         : "a"(number), "D"(arg1), "S"(arg2), "d"(arg3), "r"(r10)
-        : "rcx", "r11", "r8",
+        : "rcx", "r11", "r8", "r9",
           "r12", "r13", "r14", "r15", "memory"
     );
-    return r9;
+    return ret;
 }
 
 static inline uint64_t syscall5(uint64_t number, uint64_t arg1, uint64_t arg2,
                                 uint64_t arg3, uint64_t arg4, uint64_t arg5) {
-    register uint64_t r9 asm("r9");
+    uint64_t ret;
     register uint64_t r10 asm("r10") = arg4;
     register uint64_t r8  asm("r8")  = arg5;
     __asm__ volatile (
         "syscall"
-        : "=r"(r9)
+        : "=a"(ret)
         : "a"(number), "D"(arg1), "S"(arg2), "d"(arg3), "r"(r10), "r"(r8)
-        : "rcx", "r11",
+        : "rcx", "r11", "r9",
           "r12", "r13", "r14", "r15", "memory"
     );
-    return r9;
+    return ret;
 }
 
 typedef struct {
@@ -112,7 +112,7 @@ typedef struct {
 } ipc_msg_t;
 
 static inline uint64_t ipc_recv_msg(uint64_t ep_id, ipc_msg_t *out) {
-    register uint64_t r9  asm("r9");
+    uint64_t ret;
     register uint64_t rdi asm("rdi") = ep_id;
     register uint64_t rsi asm("rsi");
     register uint64_t rdx asm("rdx");
@@ -121,10 +121,9 @@ static inline uint64_t ipc_recv_msg(uint64_t ep_id, ipc_msg_t *out) {
 
     __asm__ volatile (
         "syscall"
-        : "=r"(r9), "=r"(rsi), "=r"(rdx), "=r"(r10), "=r"(r8),
-          "+r"(rdi)  
+        : "=a"(ret), "+r"(rdi), "=r"(rsi), "=r"(rdx), "=r"(r10), "=r"(r8)
         : "a"((uint64_t)SYS_IPC_RECV)
-        : "rcx", "r11", "r12", "r13", "r14", "r15", "memory"
+        : "rcx", "r11", "r9", "r12", "r13", "r14", "r15", "memory"
     );
 
     if (out) {
@@ -134,7 +133,8 @@ static inline uint64_t ipc_recv_msg(uint64_t ep_id, ipc_msg_t *out) {
         out->data[2] = r10;
         out->data[3] = r8;
     }
-    return r9; 
+
+    return ret;
 }
 
 static inline uint64_t ipc_ep_create(void) {

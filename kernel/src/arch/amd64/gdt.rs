@@ -10,7 +10,7 @@ use x86_64::{
     }
 };
 
-use crate::{define_per_cpu_struct, define_per_cpu_u64, early_println};
+use crate::{define_per_cpu_struct};
 
 pub(crate) const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 pub(crate) const PAGE_FAULT_IST_INDEX: u16 = 1;
@@ -122,6 +122,15 @@ define_per_cpu_struct! {
     }
 }
 
+pub fn set_tss_rsp0(rsp0: VirtAddr) {
+    PercpuGdt::with_guard(|local_gdt| {
+        unsafe {
+            let tss = &mut *local_gdt.tss.as_mut_ptr();
+            tss.privilege_stack_table[0] = rsp0;
+        }
+    });
+}
+
 pub fn setup_gdt_for_local_core() {
     PercpuGdt::with_guard(|local_gdt| {
         let df_stack_top = VirtAddr::from_ptr(local_gdt.df_stack.as_ptr())
@@ -136,7 +145,6 @@ pub fn setup_gdt_for_local_core() {
         tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = df_stack_top;
         tss.interrupt_stack_table[PAGE_FAULT_IST_INDEX as usize] = pgf_stack_top;
         tss.privilege_stack_table[0]  = kernel_stack_top;
-
 
         unsafe {
             local_gdt.tss.as_mut_ptr().write(tss);
