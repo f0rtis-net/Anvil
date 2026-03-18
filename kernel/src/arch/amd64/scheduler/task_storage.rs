@@ -3,7 +3,7 @@ use spin::{Mutex, Once};
 use crate::arch::amd64::scheduler::task::{Task, TaskId, TaskIdIndex};
 
 pub struct TaskTable {
-    tasks: Mutex<BTreeMap<TaskIdIndex, Arc<Task>>>,
+    pub tasks: Mutex<BTreeMap<TaskIdIndex, Arc<Task>>>,
 }
 
 impl TaskTable {
@@ -49,7 +49,7 @@ impl GlobalRunQueue {
 static TASK_TABLE:        Once<TaskTable>      = Once::new();
 static GLOBAL_RUN_QUEUE:  Once<GlobalRunQueue> = Once::new();
 
-#[inline] fn table() -> &'static TaskTable      { TASK_TABLE.get().expect("task table not initialized") }
+#[inline] pub fn table() -> &'static TaskTable      { TASK_TABLE.get().expect("task table not initialized") }
 #[inline] fn global_queue() -> &'static GlobalRunQueue { GLOBAL_RUN_QUEUE.get().expect("global run queue not initialized") }
 
 pub fn initialize_task_storage() {
@@ -91,4 +91,14 @@ pub fn steal_from_global(buf: &mut [Option<Arc<Task>>]) -> usize {
 
 pub fn global_queue_empty() -> bool {
     global_queue().is_empty()
+}
+
+pub fn for_each_task<F>(mut f: F)
+where
+    F: FnMut(&Arc<Task>),
+{
+    let tasks = table().tasks.lock();
+    for task in tasks.values() {
+        f(task);
+    }
 }

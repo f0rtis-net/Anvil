@@ -1,263 +1,223 @@
-use alloc::{collections::btree_map::BTreeMap, vec::Vec};
-use bitflags::bitflags;
-use x86_64::{
-    PhysAddr, VirtAddr,
-    structures::paging::{Page, PageTableFlags, Size4KiB, page::PageRangeInclusive},
-};
+use alloc::{collections::BTreeMap, vec::Vec};
+use x86_64::{PhysAddr, VirtAddr, structures::paging::{OffsetPageTable, PageTable, PageTableFlags}};
+use crate::arch::amd64::memory::{misc::virt_to_phys, pmm::pages_allocator::free_pages, vmm::{
+    PAGE_SIZE, map_single_page, unmap_single_page
+}};
 
-const USER_SPACE_START: u64 = 0x0000_0000_0040_0000; 
-const USER_SPACE_END:   u64 = 0x0000_7FFF_FFFF_0000;
-
-bitflags! {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct VmFlags: u32 {
+bitflags::bitflags! {
+    #[derive(Clone, Copy)]
+    pub struct MapFlags: u32 {
         const READ    = 1 << 0;
         const WRITE   = 1 << 1;
         const EXEC    = 1 << 2;
-        const FIXED   = 1 << 3;
+        const USER    = 1 << 3;
+        const NOCACHE = 1 << 4;
     }
 }
 
-impl VmFlags {
-    pub fn to_page_table_flags(self) -> PageTableFlags {
-        let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
-        if self.contains(VmFlags::WRITE) {
-            flags |= PageTableFlags::WRITABLE;
-        }
-        if !self.contains(VmFlags::EXEC) {
-            flags |= PageTableFlags::NO_EXECUTE;
-        }
-        flags
+impl MapFlags {
+    pub fn to_page_table_flags(&self) -> PageTableFlags { 
+        let mut f = PageTableFlags::PRESENT;
+        if self.contains(Self::WRITE)   { f |= PageTableFlags::WRITABLE; }
+        if self.contains(Self::USER)    { f |= PageTableFlags::USER_ACCESSIBLE; }
+        if self.contains(Self::NOCACHE) { f |= PageTableFlags::NO_CACHE; }
+        if !self.contains(Self::EXEC)   { f |= PageTableFlags::NO_EXECUTE; }
+        f
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum VmAreaKind {
-    Text,       
-    Data,       
-    Bss,        
-    Stack,      
-    Heap,       
-    Mmap,       
+pub enum VmaBacking {
+    Physical { phys_addr: PhysAddr },
+    Device   { phys_addr: PhysAddr },
+    Reserved,
 }
 
-#[derive(Debug, Clone)]
-pub struct VmArea {
-    pub start:   VirtAddr,
-    pub end:     VirtAddr,
-    pub flags:   VmFlags,
-    pub kind:    VmAreaKind,
-    pub name:    Option<&'static str>,
+pub struct Vma {
+    pub vaddr:   VirtAddr,
+    pub size:    usize,
+    pub flags:   MapFlags,
+    pub backing: VmaBacking,
 }
 
-impl VmArea {
-    pub fn new(start: VirtAddr, end: VirtAddr, flags: VmFlags, kind: VmAreaKind) -> Self {
-        Self { start, end, flags, kind, name: None }
+impl Vma {
+    pub fn end(&self) -> VirtAddr {
+        VirtAddr::new(self.vaddr.as_u64() + self.size as u64)
     }
-
-    pub fn with_name(mut self, name: &'static str) -> Self {
-        self.name = Some(name);
-        self
-    }
-
-    pub fn size(&self) -> u64 {
-        self.end.as_u64() - self.start.as_u64()
-    }
-
     pub fn contains(&self, addr: VirtAddr) -> bool {
-        addr >= self.start && addr < self.end
+        addr >= self.vaddr && addr < self.end()
     }
+    pub fn overlaps(&self, other: &Vma) -> bool {
+        self.vaddr < other.end() && other.vaddr < self.end()
+    }
+}
 
-    pub fn overlaps(&self, other: &VmArea) -> bool {
-        self.start < other.end && other.start < self.end
-    }
-
-    pub fn is_valid(&self) -> bool {
-        self.start < self.end
-            && self.end.as_u64() <= USER_SPACE_END
-            && self.start.as_u64() >= 0x1000
-    }
-
-    pub fn page_range(&self) -> PageRangeInclusive {
-        let start_page = Page::<Size4KiB>::containing_address(self.start);
-        let end_page   = Page::<Size4KiB>::containing_address(self.end - 1u64);
-        Page::range_inclusive(start_page, end_page)
-    }
-
-    pub fn page_table_flags(&self) -> PageTableFlags {
-        self.flags.to_page_table_flags()
-    }
+pub struct AddrSpace {
+    vmas:       BTreeMap<u64, Vma>,   
+    pub page_table: OffsetPageTable<'static>,
 }
 
 #[derive(Debug)]
-pub struct AddrSpace {
-    areas:          Vec<VmArea>,
-    pub pml4_phys:  PhysAddr,
-    pub brk:        VirtAddr,
-    pub brk_start:  VirtAddr,
+pub enum VmaError {
+    NotAligned,
+    Overlap,
+    NotFound,
+    PageTableError(&'static str),
 }
 
 impl AddrSpace {
-    pub fn new(pml4_phys: PhysAddr) -> Self {
-        Self {
-            areas:     Vec::new(),
-            pml4_phys,
-            brk:       VirtAddr::new(0),
-            brk_start: VirtAddr::new(0),
-        }
+    pub fn new(page_table: OffsetPageTable<'static>) -> Self {
+        Self { vmas: BTreeMap::new(), page_table }
     }
 
-    pub fn add_area(&mut self, area: VmArea) -> Result<(), &'static str> {
-        if !area.is_valid() {
-            return Err("VmArea: invalid range or outside user space");
-        }
-        if self.overlaps_any(&area) {
-            return Err("VmArea: overlaps with existing region");
+    pub fn get_page_table_phys(&self) -> PhysAddr {
+        let virt = self.page_table.level_4_table() as *const PageTable as u64;
+        PhysAddr::new(virt_to_phys(virt as usize) as u64)
+    }
+
+    pub fn map(
+        &mut self,
+        vaddr:   VirtAddr,
+        size:    usize,
+        backing: VmaBacking,
+        flags:   MapFlags,
+    ) -> Result<(), VmaError> {
+        if !vaddr.is_aligned(PAGE_SIZE as u64) || size % PAGE_SIZE != 0 {
+            return Err(VmaError::NotAligned);
         }
 
-        let pos = self.areas.partition_point(|a| a.start <= area.start);
-        self.areas.insert(pos, area);
+        let vma = Vma { vaddr, size, flags, backing };
+
+        if self.find_overlapping(&vma).is_some() {
+            return Err(VmaError::Overlap);
+        }
+
+        self.map_in_page_table(&vma)
+            .map_err(VmaError::PageTableError)?;
+
+        self.vmas.insert(vaddr.as_u64(), vma);
         Ok(())
     }
 
-    pub fn remove_area(&mut self, start: VirtAddr) -> Option<VmArea> {
-        let pos = self.areas.iter().position(|a| a.start == start)?;
-        Some(self.areas.remove(pos))
-    }
-
-
-    pub fn find_area(&self, addr: VirtAddr) -> Option<&VmArea> {
-        let idx = self.areas.partition_point(|a| a.start <= addr);
-        if idx == 0 {
-            return None;
-        }
-        let area = &self.areas[idx - 1];
-        if area.contains(addr) { Some(area) } else { None }
-    }
-
-    pub fn find_area_mut(&mut self, addr: VirtAddr) -> Option<&mut VmArea> {
-        let idx = self.areas.partition_point(|a| a.start <= addr);
-        if idx == 0 {
-            return None;
-        }
-        let area = &mut self.areas[idx - 1];
-        if area.contains(addr) { Some(area) } else { None }
-    }
-
-    pub fn find_free_region(&self, size: u64, align: u64) -> Option<VirtAddr> {
-        let mut cursor = align_up_u64(USER_SPACE_START, align);
-
-        for area in &self.areas {
-            let candidate_end = cursor + size;
-            if candidate_end <= area.start.as_u64() {
-                return Some(VirtAddr::new(cursor));
-            }
-            cursor = align_up_u64(area.end.as_u64(), align);
-        }
-
-        if cursor + size <= USER_SPACE_END {
-            Some(VirtAddr::new(cursor))
-        } else {
-            None
-        }
-    }
-
-    pub fn init_brk(&mut self, start: VirtAddr) {
-        self.brk_start = start;
-        self.brk       = start;
-    }
-
-    pub fn set_brk(&mut self, new_brk: VirtAddr) -> Result<VirtAddr, &'static str> {
-        if new_brk < self.brk_start {
-            return Err("brk: cannot move below brk_start");
-        }
-        if new_brk.as_u64() > USER_SPACE_END {
-            return Err("brk: exceeds user space limit");
-        }
-
-        if new_brk > self.brk {
-            let candidate = VmArea::new(self.brk, new_brk, VmFlags::READ | VmFlags::WRITE, VmAreaKind::Heap);
-            if self.overlaps_any(&candidate) {
-                return Err("brk: would overlap existing region");
-            }
-        }
-
-        self.brk = new_brk;
-        Ok(self.brk)
-    }
-
-    pub fn handle_page_fault(
-        &self,
-        addr: VirtAddr,
-        write: bool,
-        user: bool,
-    ) -> Result<PageTableFlags, PageFaultReject> {
-        if !user {
-            return Err(PageFaultReject::KernelAccess);
-        }
-
-        let area = self.find_area(addr).ok_or(PageFaultReject::NoMapping)?;
-
-        if write && !area.flags.contains(VmFlags::WRITE) {
-            return Err(PageFaultReject::WriteToReadOnly);
-        }
-
-        Ok(area.page_table_flags())
-    }
-
-    pub fn areas(&self) -> &[VmArea] {
-        &self.areas
-    }
-
-    pub fn all_page_ranges(&self) -> impl Iterator<Item = PageRangeInclusive> + '_ {
-        self.areas.iter().map(|a| a.page_range())
-    }
-
-    pub fn validate(&self) -> Result<(), &'static str> {
-        if self.pml4_phys.is_null() {
-            return Err("pml4_phys is null");
-        }
-        for window in self.areas.windows(2) {
-            let (a, b) = (&window[0], &window[1]);
-            if !a.is_valid() {
-                return Err("invalid VmArea detected");
-            }
-            if a.end > b.start {
-                return Err("overlapping regions detected");
+    pub fn unmap(&mut self, vaddr: VirtAddr) -> Result<(), VmaError> {
+        let vma = self.vmas.remove(&vaddr.as_u64())
+            .ok_or(VmaError::NotFound)?;
+        
+        let pages = vma.size / PAGE_SIZE;
+        for i in 0..pages {
+            let va = VirtAddr::new(vma.vaddr.as_u64() + (i * PAGE_SIZE) as u64);
+            match &vma.backing {
+                VmaBacking::Reserved => {
+                    let _ = unmap_single_page(&mut self.page_table, va);
+                }
+                VmaBacking::Physical { .. } | VmaBacking::Device { .. } => {
+                    unmap_single_page(&mut self.page_table, va)
+                        .map_err(VmaError::PageTableError)?;
+                }
             }
         }
         Ok(())
     }
 
-    pub fn clear(&mut self) {
-        self.areas.clear();
-        self.brk       = VirtAddr::new(0);
-        self.brk_start = VirtAddr::new(0);
+    pub fn protect(
+        &mut self,
+        vaddr: VirtAddr,
+        flags: MapFlags,
+    ) -> Result<(), VmaError> {
+        let vma = self.vmas.get_mut(&vaddr.as_u64())
+            .ok_or(VmaError::NotFound)?;
+
+        let pt_flags = flags.to_page_table_flags();
+        let pages = vma.size / PAGE_SIZE;
+
+        for i in 0..pages {
+            let va = VirtAddr::new(vma.vaddr.as_u64() + (i * PAGE_SIZE) as u64);
+
+            let phys = match &vma.backing {
+                VmaBacking::Physical { phys_addr } |
+                VmaBacking::Device   { phys_addr } => {
+                    PhysAddr::new(phys_addr.as_u64() + (i * PAGE_SIZE) as u64)
+                }
+                VmaBacking::Reserved => continue,
+            };
+
+            unmap_single_page(&mut self.page_table, va)
+                .map_err(VmaError::PageTableError)?;
+
+            map_single_page(&mut self.page_table, va, phys, pt_flags)
+                .map_err(VmaError::PageTableError)?;
+        }
+
+        vma.flags = flags;
+        Ok(())
     }
 
+    pub fn find(&self, addr: VirtAddr) -> Option<&Vma> {
+        self.vmas
+            .range(..=addr.as_u64())
+            .next_back()
+            .map(|(_, vma)| vma)
+            .filter(|vma| vma.contains(addr))
+    }
 
-    fn overlaps_any(&self, new_area: &VmArea) -> bool {
-        let idx = self.areas.partition_point(|a| a.end.as_u64() <= new_area.start.as_u64());
-        self.areas[idx..].iter().any(|a| {
-            if a.start >= new_area.end { false } else { a.overlaps(new_area) }
-        })
+    fn map_in_page_table(&mut self, vma: &Vma) -> Result<(), &'static str> {
+        let pages    = vma.size / PAGE_SIZE;
+        let pt_flags = vma.flags.to_page_table_flags();
+
+        for i in 0..pages {
+            let va = VirtAddr::new(vma.vaddr.as_u64() + (i * PAGE_SIZE) as u64);
+
+            match &vma.backing {
+                VmaBacking::Physical { phys_addr } |
+                VmaBacking::Device   { phys_addr } => {
+                    let pa = PhysAddr::new(phys_addr.as_u64() + (i * PAGE_SIZE) as u64);
+                    map_single_page(&mut self.page_table, va, pa, pt_flags)?;
+                }
+                VmaBacking::Reserved => {
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn find_overlapping(&self, new: &Vma) -> Option<&Vma> {
+        self.vmas
+            .range(..new.end().as_u64())
+            .next_back()
+            .map(|(_, vma)| vma)
+            .filter(|vma| vma.overlaps(new))
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PageFaultReject {
-    NoMapping,        
-    WriteToReadOnly,  
-    KernelAccess,     
-}
-
-fn align_up_u64(val: u64, align: u64) -> u64 {
-    debug_assert!(align.is_power_of_two(), "align must be power of two");
-    (val + align - 1) & !(align - 1)
-}
-
-impl Default for AddrSpace {
-    fn default() -> Self {
-        Self::new(PhysAddr::zero())
+impl Drop for AddrSpace {
+    fn drop(&mut self) {
+        let vaddrs: Vec<u64> = self.vmas.keys().copied().collect();
+        
+        for vaddr in vaddrs {
+            let vma = self.vmas.remove(&vaddr).unwrap();
+            let pages = vma.size / PAGE_SIZE;
+            
+            for i in 0..pages {
+                let va = VirtAddr::new(vma.vaddr.as_u64() + (i * PAGE_SIZE) as u64);
+                
+                match &vma.backing {
+                    VmaBacking::Physical { phys_addr } => {
+                        if let Ok(pa) = unmap_single_page(&mut self.page_table, va) {
+                            free_pages(pa);
+                        }
+                    }
+                    VmaBacking::Device { .. } => {
+                        let _ = unmap_single_page(&mut self.page_table, va);
+                    }
+                    VmaBacking::Reserved => {
+                        if let Ok(pa) = unmap_single_page(&mut self.page_table, va) {
+                            free_pages(pa);
+                        }
+                    }
+                }
+            }
+        }
+        
+        let pt_phys = self.get_page_table_phys();
+        free_pages(pt_phys);
     }
 }

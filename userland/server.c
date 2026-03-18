@@ -10,6 +10,22 @@ void _start(void) {
     long ep_id = ipc_ep_create();
     printf("Server: created ep_endpoint. Ep num: %u\n", ep_id);
 
+    uint64_t addr = alloc_frame();
+
+    printf("Server: allocated frame. Addr: 0x%x\n", addr);
+
+    vma_map(0x5000, 4096, MAP_READ | MAP_WRITE | MAP_USER);
+    printf("Server: mapped page with addr: 0x5000\n");
+
+    volatile uint64_t *ptr = (volatile uint64_t *)0x5000;
+    *ptr = 0xDEADBEEF;
+    printf("wrote: 0x%x\n", *ptr);
+
+    vma_unmap(0x5000);
+    printf("Server: unmapped page with addr: 0x5000\n");
+
+    sleep(100000ULL);
+
     for (;;) {
         ipc_msg_t msg;
 

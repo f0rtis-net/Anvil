@@ -8,13 +8,13 @@ mod stack;
 mod cpu_local;
 mod elf;
 pub mod exec_loader;
-mod addr_space;
+pub mod addr_space;
 pub mod task_storage;
 mod syscall;
 
 use crate::{
     arch::amd64::{
-        apic::{PercpuLapic, start_timer}, gdt::set_tss_rsp0, scheduler::{cpu_local::ExecCpu, exec_loader::{make_kernel_task, make_user_task}, syscall::{init_syscall_subsystem, set_per_cpu_TOP_OF_KERNEL_STACK}, task::{Task, TaskId, TaskState}, task_storage::{add_task_to_execute, initialize_task_storage, steal_from_global}}
+        apic::{PercpuLapic, start_timer}, gdt::set_tss_rsp0, scheduler::{cpu_local::ExecCpu, exec_loader::{make_kernel_task, make_user_task}, syscall::{init_syscall_subsystem, set_per_cpu_TOP_OF_KERNEL_STACK}, task::{Task, TaskId, TaskIdIndex, TaskState}, task_storage::{add_task_to_execute, for_each_task, get_task_by_index, initialize_task_storage, inject_sleeping_task, steal_from_global, table}}
     }, define_per_cpu_struct, irq
 };
 
@@ -25,6 +25,7 @@ pub static CLIENT: &[u8] = include_bytes!("../../../../external/client.elf");
 pub static SERVER: &[u8] = include_bytes!("../../../../external/server.elf");
 
 static CPU_NUM: AtomicU64 = AtomicU64::new(0);
+static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
 
 struct CpuDescriptorStorage {
     cpus: Vec<UnsafeCell<ExecCpu>>,
@@ -80,7 +81,7 @@ static CPU_DESCRIPTORS: Once<CpuDescriptorStorage> = Once::new();
 define_per_cpu_struct!{
     pub(super) struct PerCpuSchedulerData {
         cpu_id: usize,
-        curr_task_id: TaskId,
+        pub curr_task_id: TaskId,
         in_rescheduling: bool,
         descriptors: &'static CpuDescriptorStorage,
     }
@@ -105,12 +106,13 @@ pub fn init_scheduler_percpu() -> !{
     let my_desc = descriptors.cpu(cpu_id);
     let dummy_rsp: u64 = 0;
     let idle_rsp = unsafe { (*my_desc.idle_task.registers.get()).rsp };
-    let idle_cr3 = my_desc.idle_task.page_table;
+    let idle_cr3 = my_desc.idle_task.addr_space.lock().get_page_table_phys();
+
     unsafe {
         switch_to_task(
             addr_of!(dummy_rsp),
             idle_rsp,
-            idle_cr3,
+            idle_cr3.as_u64(),
         );
     }
 
@@ -144,9 +146,71 @@ pub fn block_current_on_ipc() {
         PerCpuSchedulerData::get_mut().curr_task_id = my_desc.idle_task.id;
 
         let idle_rsp = (*my_desc.idle_task.registers.get()).rsp;
-        let idle_cr3 = my_desc.idle_task.page_table;
+        let idle_cr3 = my_desc.idle_task.addr_space.lock().get_page_table_phys();
 
-        switch_to_task(task_rsp_ptr, idle_rsp, idle_cr3);
+        switch_to_task(task_rsp_ptr, idle_rsp, idle_cr3.as_u64());
+    }
+}
+
+pub fn sleep(ns: u64) {
+    let my_id = PerCpuSchedulerData::get().cpu_id;
+    let my_desc = PerCpuSchedulerData::get().descriptors.cpu_mut(my_id);
+    let curr_ptr = my_desc.get_curr_task();
+
+    let ticks = (ns + 999_999) / 1_000_000;
+
+    if ticks == 0 {
+        return;
+    }
+
+    let current_tick = TICK_COUNT.load(Ordering::Relaxed);
+    let wake_at = current_tick + ticks;
+
+    unsafe { 
+        (*curr_ptr).wake_at_tick.lock().store(wake_at, Ordering::Relaxed); 
+        (*curr_ptr).set_state(TaskState::Sleep);
+
+        let task_rsp_ptr = addr_of!((*(*curr_ptr).registers.get()).rsp);
+        my_desc.set_curr_task(core::ptr::null_mut());
+        PerCpuSchedulerData::get_mut().curr_task_id = my_desc.idle_task.id;
+
+        let idle_rsp = (*my_desc.idle_task.registers.get()).rsp;
+        let idle_cr3 = my_desc.idle_task.addr_space.lock().get_page_table_phys();
+
+        switch_to_task(task_rsp_ptr, idle_rsp, idle_cr3.as_u64());
+    }
+}
+
+fn wake_sleeping_tasks() {
+    let my_id = PerCpuSchedulerData::get().cpu_id;
+
+    //todo, refactor to bsp, when exists
+    if my_id != 1 {
+        return;
+    }
+
+    let now = TICK_COUNT.load(Ordering::Relaxed);
+
+    let to_wake: Vec<TaskIdIndex> = {
+        let tasks = table().tasks.lock();
+        tasks.values()
+            .filter(|t| {
+                if !matches!(t.get_state(), TaskState::Sleep) {
+                    return false;
+                }
+                let wake_at = t.wake_at_tick.lock().load(Ordering::Acquire);
+                wake_at != 0 && now >= wake_at
+            })
+            .map(|t| t.id.id())
+            .collect()
+    }; 
+
+    for idx in to_wake {
+        if let Some(task) = get_task_by_index(idx) {
+            task.wake_at_tick.lock().store(0, Ordering::Release);
+            task.set_state(TaskState::Ready);
+            awaken_task(task);
+        }
     }
 }
 
@@ -226,9 +290,9 @@ fn process_tick() {
                 set_tss_rsp0(VirtAddr::new((*next_ptr).kernel_stack.top.as_u64()));
                 let idle_rsp_ptr = addr_of!((*my_desc.idle_task.registers.get()).rsp);
                 let next_rsp = (*(*next_ptr).registers.get()).rsp;
-                let next_cr3 = (*next_ptr).page_table;
+                let next_cr3 = (*next_ptr).addr_space.lock().get_page_table_phys();
 
-                switch_to_task(idle_rsp_ptr, next_rsp, next_cr3);
+                switch_to_task(idle_rsp_ptr, next_rsp, next_cr3.as_u64());
             }
         },
 
@@ -247,9 +311,9 @@ fn process_tick() {
                 set_tss_rsp0(VirtAddr::new((*next_ptr).kernel_stack.top.as_u64()));
 
                 let next_rsp = (*(*next_ptr).registers.get()).rsp;
-                let next_cr3 = (*next_ptr).page_table;
+                let next_cr3 = (*next_ptr).addr_space.lock().get_page_table_phys();
 
-                switch_to_task(task_rsp_ptr, next_rsp, next_cr3);
+                switch_to_task(task_rsp_ptr, next_rsp, next_cr3.as_u64());
             }
         }
     }
@@ -259,7 +323,7 @@ fn process_tick() {
 pub(super) unsafe extern "C" fn switch_to_task(
     previous_task_stack_pointer: *const u64,
     next_task_stack_pointer: u64,
-    next_page_table: PhysAddr,
+    next_page_table: u64,
 ) {
     naked_asm!(
         "push rax",
@@ -300,6 +364,8 @@ pub(super) unsafe extern "C" fn switch_to_task(
 }
 
 irq!(0x30, scheduler_tick_irq, |stack| {
+    TICK_COUNT.fetch_add(1, Ordering::Relaxed);
     PercpuLapic::get().lapic.eoi();
+    wake_sleeping_tasks();
     process_tick();
 });

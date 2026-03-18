@@ -1,8 +1,9 @@
-use core::{arch::naked_asm, cell::UnsafeCell, sync::atomic::AtomicU8};
+use core::{arch::naked_asm, cell::UnsafeCell, sync::atomic::{AtomicU8, AtomicU64}};
 
-use x86_64::{PhysAddr, VirtAddr, instructions::interrupts, registers::{control::Cr3, rflags::RFlags}, structures::paging::{Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB}};
+use spin::Mutex;
+use x86_64::{PhysAddr, VirtAddr, instructions::interrupts, registers::control::Cr3, structures::paging::{Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB}};
 
-use crate::{arch::amd64::{gdt::{KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR, USER_CODE_SELECTOR, USER_DATA_SELECTOR}, memory::{misc::{pages_to_order, phys_to_virt}, pmm::pages_allocator::{PAllocFlags, alloc_pages_by_order}, vmm::{KernelFrameAllocator, PAGE_SIZE, create_new_pt4_from_kernel_pt4, kernel_pt}}, scheduler::{elf::ElfParsed, stack::{DEFAULT_KERNEL_STACK_SIZE, allocate_kernel_stack}, syscall::TOP_OF_KERNEL_STACK, task::{Task, TaskId, TaskIdIndex, TaskRegisters, TaskState}}}, early_println};
+use crate::{arch::amd64::{memory::{misc::{pages_to_order, phys_to_virt}, pmm::{HHDM_OFFSET, pages_allocator::{PAllocFlags, alloc_pages_by_order}}, vmm::{KernelFrameAllocator, PAGE_SIZE, create_new_pt4_from_kernel_pt4, kernel_pt}}, scheduler::{addr_space::AddrSpace, elf::ElfParsed, stack::{DEFAULT_KERNEL_STACK_SIZE, allocate_kernel_stack}, task::{Task, TaskId, TaskIdIndex, TaskRegisters, TaskState}}}};
 
 const RFLAGS_WITH_IR: u64 = 0x202;
 const USER_STACK_PAGES_COUNT: usize = 4;
@@ -128,9 +129,9 @@ pub fn make_user_task(bytes: &[u8], task_id: TaskIdIndex) -> Result<Task, &'stat
             rsp: initial_rsp,
             ..Default::default()
         }),
-        page_table: new_pml4_phys,
-        addr_space: None,
+        addr_space: Mutex::new(AddrSpace::new(pt)),
         task_state: AtomicU8::new(TaskState::Ready as u8),
+        wake_at_tick: Mutex::new(AtomicU64::new(0))
     })
 }
 
@@ -154,31 +155,36 @@ extern "C" fn kernel_task_trampoline(entry: u64) -> ! {
 }
 
 pub fn make_kernel_task(id: TaskId, entry_point: u64) -> Task {
-    let phys_frame = Cr3::read().0;
+    let (phys_frame, _) = Cr3::read();
     let phys_addr_of_pt = phys_frame.start_address();
+    
+    let hhdm_offset = VirtAddr::new(unsafe { HHDM_OFFSET as u64 });
+    let page_table = unsafe {
+        let virt = phys_to_virt(phys_addr_of_pt.as_u64() as usize);
+        let pml4 = &mut *(virt as *mut PageTable);
+        OffsetPageTable::new(pml4, hhdm_offset)
+    };
+
     let kernel_stack = allocate_kernel_stack(DEFAULT_KERNEL_STACK_SIZE);
-
     let stack_top_ptr = kernel_stack.top.as_u64() as *mut u64;
-
     unsafe {
         stack_top_ptr.sub(1).write(kernel_task_trampoline as u64);
         for i in 2..=16 {
             stack_top_ptr.sub(i).write(0);
         }
-        stack_top_ptr.sub(8).write(entry_point); 
+        stack_top_ptr.sub(8).write(entry_point);
     }
-
     let initial_rsp = unsafe { stack_top_ptr.sub(16) } as u64;
 
     Task {
         id,
         kernel_stack,
-        registers: UnsafeCell::new(TaskRegisters { 
+        registers: UnsafeCell::new(TaskRegisters {
             rsp: initial_rsp,
-            .. TaskRegisters::default()
+            ..TaskRegisters::default()
         }),
-        page_table: phys_addr_of_pt,
-        addr_space: None,
+        addr_space: Mutex::new(AddrSpace::new(page_table)),
         task_state: AtomicU8::new(TaskState::Ready as u8),
+        wake_at_tick: Mutex::new(AtomicU64::new(0))
     }
 }

@@ -42,6 +42,35 @@ The goal of this project is not maximum performance at any cost, but **predictab
 If functionality can be safely implemented in user space, it **does not belong in the kernel**.
 
 
+### syscalls
+thread_exit
+thread_sleep - done
+
+tcb_configure
+tcb_set_regs
+tcb_resume
+tcb_suspend
+tcb_read_regs
+
+invoke
+recv
+reply
+reply_recv
+
+cnode_copy
+cnode_move
+cnode_delete
+cnode_revoke
+
+frame_alloc - done
+vma_map - done
+vma_unmap - done
+mprotect - done
+
+notify_signal
+notify_wait
+notify_poll
+
 ## Credits:
 
 [Project base](https://github.com/jasondyoungberg/limine-rust-template/tree/trunk)

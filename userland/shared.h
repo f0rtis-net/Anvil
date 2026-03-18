@@ -19,6 +19,18 @@ typedef __uint64_t uint64_t;
 #define SYS_IPC_REPLY      0x63
 #define SYS_PRINT          0x10
 
+#define SYS_ALLOC_FRAME 0x2
+#define SYS_VMA_MAP     0x3
+#define SYS_VMA_UNMAP   0x4
+#define SYS_MPROTECT    0x5
+
+#define MAP_READ  (1 << 0)
+#define MAP_WRITE (1 << 1)
+#define MAP_EXEC  (1 << 2)
+#define MAP_USER  (1 << 3)
+
+#define SYS_THREAD_SLEEP 0x99
+
 typedef struct {
     uint64_t ep_id;
     uint64_t msg[4];
@@ -167,6 +179,26 @@ static inline uint64_t ipc_call(uint64_t ep_id, uint64_t req0, uint64_t req1,
 static inline uint64_t ipc_reply(uint64_t ep_id, uint64_t resp0, uint64_t resp1,
                                  uint64_t resp2, uint64_t resp3) {
     return syscall5(SYS_IPC_REPLY, ep_id, resp0, resp1, resp2, resp3);
+}
+
+static inline uint64_t alloc_frame() {
+    return syscall0(SYS_ALLOC_FRAME);
+}
+
+static inline uint64_t vma_map(uint64_t vaddr, uint64_t size, uint64_t flags) {
+    return syscall3(SYS_VMA_MAP, vaddr, size, flags);
+}
+
+static inline uint64_t vma_unmap(uint64_t vaddr) {
+    return syscall1(SYS_VMA_UNMAP, vaddr);
+}
+
+static inline uint64_t mprotect(uint64_t vaddr, uint64_t flags) {
+    return syscall2(SYS_MPROTECT, vaddr, flags);
+}
+
+static inline uint64_t sleep(uint64_t ns) {
+    return syscall1(SYS_THREAD_SLEEP, ns);
 }
 
 static inline uint64_t sys_print(const char *str, uint64_t len) {

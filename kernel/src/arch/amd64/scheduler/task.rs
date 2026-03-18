@@ -1,5 +1,6 @@
-use core::{cell::UnsafeCell, ptr::NonNull, sync::atomic::{AtomicU8, Ordering}};
+use core::{cell::UnsafeCell, ptr::NonNull, sync::atomic::{AtomicU8, AtomicU64, Ordering}};
 
+use spin::Mutex;
 use x86_64::PhysAddr;
 
 use crate::arch::amd64::{cpu::frames::InterruptFrame, scheduler::{addr_space::AddrSpace, stack::KernelStack}};
@@ -42,9 +43,9 @@ pub struct Task {
     pub id: TaskId,
     pub kernel_stack: KernelStack,
     pub registers: UnsafeCell<TaskRegisters>,
-    pub page_table: PhysAddr,
-    pub addr_space: Option<AddrSpace>,
+    pub addr_space: Mutex<AddrSpace>,
     pub task_state: AtomicU8,
+    pub wake_at_tick: Mutex<AtomicU64>,
 }
 
 unsafe impl Sync for Task {}
@@ -56,9 +57,10 @@ impl Task {
 
     pub fn get_state(&self) -> TaskState {
         match self.task_state.load(Ordering::Acquire) {
-            0 => TaskState::Ready,
-            1 => TaskState::Running,
-            2 => TaskState::Sleep,
+            0 => TaskState::Running,
+            1 => TaskState::Ready,
+            2 => TaskState::Exiting,
+            3 => TaskState::Sleep,
             _ => panic!("invalid task state"),
         }
     }
@@ -67,31 +69,31 @@ impl Task {
 #[derive(Debug, Default)]
 #[repr(packed)]
 #[allow(dead_code)]
-pub(super) struct TaskRegisters {
-    pub(super) r15: u64,
-    pub(super) r14: u64,
-    pub(super) r13: u64,
-    pub(super) r12: u64,
-    pub(super) rbp: u64,
-    pub(super) rbx: u64,
+pub struct TaskRegisters {
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub rbp: u64,
+    pub rbx: u64,
 
-    pub(super) r11: u64,
-    pub(super) r10: u64,
-    pub(super) r9: u64,
-    pub(super) r8: u64,
-    pub(super) rax: u64,
-    pub(super) rcx: u64,
-    pub(super) rdx: u64,
-    pub(super) rsi: u64,
-    pub(super) rdi: u64,
+    pub r11: u64,
+    pub r10: u64,
+    pub r9: u64,
+    pub r8: u64,
+    pub rax: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
 
-    pub(super) syscall_number_or_irq_or_error_code: u64,
+    pub syscall_number_or_irq_or_error_code: u64,
 
-    pub(super) rip: u64,
-    pub(super) cs: u64,
-    pub(super) rflags: u64,
-    pub(super) rsp: u64,
-    pub(super) ss: u64,
+    pub rip: u64,
+    pub cs: u64,
+    pub rflags: u64,
+    pub rsp: u64,
+    pub ss: u64,
 }
 
 

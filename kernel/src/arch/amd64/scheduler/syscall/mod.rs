@@ -1,11 +1,13 @@
 use core::arch::naked_asm;
 
 use spin::Mutex;
-use x86_64::{VirtAddr, registers::{control::{Efer, EferFlags}, model_specific::{LStar, SFMask}, rflags::RFlags}};
+use x86_64::{VirtAddr, registers::{control::{Efer, EferFlags}, model_specific::{LStar, SFMask}, rflags::RFlags}, structures::paging::frame};
 
-use crate::{arch::amd64::{gdt::{USER_CODE_SELECTOR, USER_DATA_SELECTOR}, ipc::{IPC_MANAGER, IpcError, IpcResult, endpoint::EndpointId, message::{FastMessage, MsgLabel}}, scheduler::{PerCpuSchedulerData, awaken_task, block_current_on_ipc, syscall::ipc_handlers::{IpcSyscallNumbers, handle_ipc_call, handle_ipc_ep_create, handle_ipc_ep_destroy, handle_ipc_recv, handle_ipc_reply, handle_ipc_send}, task::TaskRegisters, task_storage::get_task_by_index}}, define_per_cpu_u64, early_print, early_println};
+use crate::{arch::amd64::{gdt::{USER_CODE_SELECTOR, USER_DATA_SELECTOR}, ipc::{IpcError, IpcResult, endpoint::EndpointId, message::{FastMessage, MsgLabel}}, scheduler::{PerCpuSchedulerData, syscall::{ipc_handlers::{IpcSyscallNumbers, handle_ipc_call, handle_ipc_ep_create, handle_ipc_ep_destroy, handle_ipc_recv, handle_ipc_reply, handle_ipc_send}, memory_handler::{MemorySyscallNumbers, frame_alloc, mprotect, vma_map, vma_unmap}, thread_handler::{ThreadSyscallNums, thread_sleep}}, task::TaskRegisters, task_storage::get_task_by_index}}, define_per_cpu_u64, early_print, early_println};
 
 mod ipc_handlers;
+mod memory_handler;
+mod thread_handler;
 
 struct IpcSyscallArguments {
     ep_id: u64,
@@ -68,6 +70,16 @@ fn syscall_dispatcher(registers: &mut TaskRegisters, args: &SyscallArguments) ->
         x if x == IpcSyscallNumbers::IpcCall as u64 => handle_ipc_call(curr_task_id, &ipc, registers) as u64,
 
         x if x == IpcSyscallNumbers::IpcReply as u64 => handle_ipc_reply(curr_task_id, &ipc) as u64,
+
+        x if x == MemorySyscallNumbers::FrameAlloc as u64 => frame_alloc(),
+
+        x if x == MemorySyscallNumbers::VmaMap as u64 => vma_map(args.arg1, args.arg2, args.arg3 as u32),
+
+        x if x == MemorySyscallNumbers::VmaUnmap as u64 => vma_unmap(args.arg1),
+
+        x if x == MemorySyscallNumbers::Mprotect as u64 => mprotect(args.arg1, args.arg2 as u32),
+        
+        x if x == ThreadSyscallNums::ThreadSleep as u64 => thread_sleep(args.arg1),
 
         _ => {
             early_println!("Unknown syscall: {} task={}", args.syscall_number, curr_task_id);
