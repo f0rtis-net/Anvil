@@ -1,6 +1,6 @@
 use alloc::{collections::{VecDeque, btree_map::BTreeMap}, sync::Arc};
 use spin::{Mutex, Once};
-use crate::arch::amd64::scheduler::task::{Task, TaskId, TaskIdIndex};
+use crate::{arch::amd64::scheduler::task::{Task, TaskId, TaskIdIndex}, early_println};
 
 pub struct TaskTable {
     pub tasks: Mutex<BTreeMap<TaskIdIndex, Arc<Task>>>,

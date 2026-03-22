@@ -1,12 +1,11 @@
 use core::{arch::naked_asm, cell::UnsafeCell, ptr::addr_of, sync::atomic::{AtomicU64, Ordering}};
 use alloc::{sync::Arc, vec::Vec};
 use spin::Once;
-use x86_64::{PhysAddr, VirtAddr, instructions::hlt};
+use x86_64::{VirtAddr, instructions::hlt};
 
 pub mod task;
 mod stack;
 mod cpu_local;
-mod elf;
 pub mod exec_loader;
 pub mod addr_space;
 pub mod task_storage;
@@ -14,15 +13,9 @@ mod syscall;
 
 use crate::{
     arch::amd64::{
-        apic::{PercpuLapic, start_timer}, gdt::set_tss_rsp0, scheduler::{cpu_local::ExecCpu, exec_loader::{make_kernel_task, make_user_task}, syscall::{init_syscall_subsystem, set_per_cpu_TOP_OF_KERNEL_STACK}, task::{Task, TaskId, TaskIdIndex, TaskState}, task_storage::{add_task_to_execute, for_each_task, get_task_by_index, initialize_task_storage, inject_sleeping_task, steal_from_global, table}}
-    }, define_per_cpu_struct, irq
+        apic::{PercpuLapic, start_timer}, gdt::set_tss_rsp0, scheduler::{cpu_local::ExecCpu, exec_loader::make_kernel_task, syscall::{init_syscall_subsystem, set_per_cpu_TOP_OF_KERNEL_STACK}, task::{Task, TaskId, TaskIdIndex, TaskState}, task_storage::{add_task_to_execute, get_task_by_index, initialize_task_storage, steal_from_global, table}}
+    }, define_per_cpu_struct, early_println, irq
 };
-
-//pub static PROGRAMM: &[u8] = include_bytes!("../../../../external/user.elf");
-
-pub static CLIENT: &[u8] = include_bytes!("../../../../external/client.elf");
-
-pub static SERVER: &[u8] = include_bytes!("../../../../external/server.elf");
 
 static CPU_NUM: AtomicU64 = AtomicU64::new(0);
 static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -121,12 +114,6 @@ pub fn init_scheduler_percpu() -> !{
 
 pub fn global_init_scheduler(n_cpus: usize) {
     CPU_DESCRIPTORS.call_once(|| CpuDescriptorStorage::new(n_cpus));
-
-    let server = make_user_task(SERVER, 1).unwrap();
-    add_task_to_execute(Arc::new(server));
-
-    let client = make_user_task(CLIENT, 2).unwrap();
-    add_task_to_execute(Arc::new(client));
 }  
 
 pub fn block_current_on_ipc() {

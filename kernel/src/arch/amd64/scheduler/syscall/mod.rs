@@ -61,7 +61,7 @@ fn syscall_dispatcher(registers: &mut TaskRegisters, args: &SyscallArguments) ->
     match args.syscall_number {
         x if x == IpcSyscallNumbers::IpcEpCreate as u64 => handle_ipc_ep_create(curr_task_id),
 
-        x if x == IpcSyscallNumbers::IpcEpDestroy as u64 => handle_ipc_ep_destroy(curr_task_id) as u64,
+        x if x == IpcSyscallNumbers::IpcEpDestroy as u64 => handle_ipc_ep_destroy(curr_task_id, args.arg1) as u64,
 
         x if x == IpcSyscallNumbers::IpcSend as u64 => handle_ipc_send(curr_task_id, &ipc) as u64,
 

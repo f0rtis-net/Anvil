@@ -11,7 +11,7 @@ mod memory;
 mod acpi;
 mod apic;
 mod timer;
-mod scheduler;
+pub mod scheduler;
 mod ipc;
 
 fn early_startup() {

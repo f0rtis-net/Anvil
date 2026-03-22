@@ -1,7 +1,7 @@
-use limine::{framebuffer::Framebuffer, memory_map::Entry, mp, response::MpResponse};
+use limine::{framebuffer::Framebuffer, memory_map::Entry, mp, response::{ModuleResponse, MpResponse}};
 use spin::{Once, RwLock, RwLockReadGuard};
 
-use crate::bootinfo::requests::{BASE_REVISION, FRAMEBUFFER_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST, RSDP_REQUEST, SMP_REQUEST};
+use crate::bootinfo::requests::{BASE_REVISION, FRAMEBUFFER_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST, MODULE_REQUEST, RSDP_REQUEST, SMP_REQUEST};
 
 mod requests;
 
@@ -15,6 +15,7 @@ pub struct BootInfo {
     rsdp_addr: Option<usize>,
     hhdm_offset: Option<u64>,
     memmap_entries: Option<MemmapEntries>,
+    init_srvs: Option<&'static ModuleResponse>
 }
 
 impl BootInfo {
@@ -31,6 +32,7 @@ impl BootInfo {
             rsdp_addr: RSDP_REQUEST.get_response().map(|addr| addr.address()),
             hhdm_offset: HHDM_REQUEST.get_response().map(|offset| offset.offset()),
             memmap_entries: MEMMAP_REQUEST.get_response().map(|resp| resp.entries()),
+            init_srvs: MODULE_REQUEST.get_response()
         }
     }
 
@@ -62,5 +64,19 @@ impl BootInfo {
 
     pub fn get_smp_response(&self) -> Option<&'static MpResponse> {
         SMP_REQUEST.get_response()
+    }
+
+    pub fn get_init_srvs() -> Option<&'static [u8]> {
+        let response = MODULE_REQUEST.get_response()?;
+        for module in response.modules() {
+            let cmdline = core::str::from_utf8(module.string().to_bytes())
+                .unwrap_or("");
+            if cmdline.contains("init_srvs") || cmdline.is_empty() {
+                let addr = module.addr() as *const u8;
+                let size = module.size() as usize;
+                return Some(unsafe { core::slice::from_raw_parts(addr, size) });
+            }
+        }
+        None
     }
 }

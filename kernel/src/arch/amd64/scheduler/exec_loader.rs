@@ -3,12 +3,15 @@ use core::{arch::naked_asm, cell::UnsafeCell, sync::atomic::{AtomicU8, AtomicU64
 use spin::Mutex;
 use x86_64::{PhysAddr, VirtAddr, instructions::interrupts, registers::control::Cr3, structures::paging::{Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB}};
 
-use crate::{arch::amd64::{memory::{misc::{pages_to_order, phys_to_virt}, pmm::{HHDM_OFFSET, pages_allocator::{PAllocFlags, alloc_pages_by_order}}, vmm::{KernelFrameAllocator, PAGE_SIZE, create_new_pt4_from_kernel_pt4, kernel_pt}}, scheduler::{addr_space::AddrSpace, elf::ElfParsed, stack::{DEFAULT_KERNEL_STACK_SIZE, allocate_kernel_stack}, task::{Task, TaskId, TaskIdIndex, TaskRegisters, TaskState}}}};
+use crate::arch::amd64::{ipc::cnode::CNode, memory::{misc::{pages_to_order, phys_to_virt}, pmm::{HHDM_OFFSET, pages_allocator::{PAllocFlags, alloc_pages_by_order}}, vmm::{KernelFrameAllocator, PAGE_SIZE, create_new_pt4_from_kernel_pt4, kernel_pt}}, scheduler::{addr_space::AddrSpace, stack::{DEFAULT_KERNEL_STACK_SIZE, allocate_kernel_stack}, task::{Task, TaskId, TaskIdIndex, TaskRegisters, TaskState}}};
 
 const RFLAGS_WITH_IR: u64 = 0x202;
 const USER_STACK_PAGES_COUNT: usize = 4;
 const USER_STACK_TOP_VIRT_ADDR: u64 = 0x7FFF_FFFF_0000;
 
+pub const USER_LOAD_VADDR: u64 = 0x400000;
+pub const USER_ENTRY_VADDR: u64 = USER_LOAD_VADDR; 
+pub const BOOTINFO_VADDR: u64 = 0x1000;
 
 fn phys_to_offset_page_table(table: PhysAddr) -> OffsetPageTable<'static> {
     let phys_offset = kernel_pt().lock().phys_offset();
@@ -17,107 +20,117 @@ fn phys_to_offset_page_table(table: PhysAddr) -> OffsetPageTable<'static> {
     unsafe { OffsetPageTable::new(&mut *page_table_ptr, phys_offset) }
 }
 
-pub fn make_user_task(bytes: &[u8], task_id: TaskIdIndex) -> Result<Task, &'static str> {
-    let elf = ElfParsed::parse(bytes).ok_or("failed to parse ELF")?;
+#[repr(C)]
+pub struct InitSvrsBootInfo {
+    pub self_tcb_cap:    u64,
+    pub self_vspace_cap: u64,
+    pub self_cnode_cap:  u64,
+}
 
+pub fn make_init_task(
+    bytes: &[u8],
+    task_id: TaskIdIndex,
+    bootinfo: InitSvrsBootInfo,
+) -> Result<Task, &'static str> {
     let new_pml4_phys = create_new_pt4_from_kernel_pt4();
     let mut pt = phys_to_offset_page_table(new_pml4_phys);
 
-    for segment in &elf.segments {
-        let seg_data = &bytes[segment.file_offset as usize
-            ..segment.file_offset as usize + segment.raw_header.p_filesz as usize];
+    let page_count = bytes.len().div_ceil(PAGE_SIZE);
+    for i in 0..page_count {
+        let va = VirtAddr::new(USER_LOAD_VADDR + (i * PAGE_SIZE) as u64);
+        let page = Page::<Size4KiB>::containing_address(va);
 
-        let page_start = segment.vaddr.align_down(4096u64);
-        let page_end = (segment.vaddr + segment.mem_size).align_up(4096u64);
-        let page_count = (page_end - page_start) / 4096;
+        let phys = alloc_pages_by_order(0, PAllocFlags::KERNEL | PAllocFlags::ZEROED)
+            .expect("make_init_task: OOM");
+        let frame = PhysFrame::<Size4KiB>::containing_address(phys);
 
-        let pt_flags = segment.flags.page_table_entry_flags();
+        let src_offset = i * PAGE_SIZE;
+        let src_end = (src_offset + PAGE_SIZE).min(bytes.len());
+        let copy_len = src_end - src_offset;
 
-        for i in 0..page_count {
-            let page_va = page_start + i * 4096;
-            let page = Page::<Size4KiB>::containing_address(page_va);
+        unsafe {
+            let dst = phys_to_virt(phys.as_u64() as usize) as *mut u8;
+            core::ptr::copy_nonoverlapping(
+                bytes.as_ptr().add(src_offset),
+                dst,
+                copy_len,
+            );
 
-            let phys = alloc_pages_by_order(0, PAllocFlags::KERNEL | PAllocFlags::ZEROED)
-                .expect("failed to alloc segment page");
-            let frame = PhysFrame::<Size4KiB>::containing_address(phys);
-
-            unsafe {
-                pt.map_to(page, frame, pt_flags, &mut KernelFrameAllocator)
-                    .unwrap()
-                    .flush();
-            }
-
-            let page_phys_virt = phys_to_virt(phys.as_u64() as usize) as *mut u8;
-
-            let page_va_start = page_va.as_u64();
-            let page_va_end = page_va_start + 4096;
-
-            let seg_va_start = segment.vaddr.as_u64();
-            let seg_va_end = seg_va_start + segment.raw_header.p_filesz;
-
-            let copy_start = seg_va_start.max(page_va_start);
-            let copy_end = seg_va_end.min(page_va_end);
-
-            if copy_start < copy_end {
-                let dst_offset = (copy_start - page_va_start) as usize;
-                let src_offset = (copy_start - seg_va_start) as usize;
-                let len = (copy_end - copy_start) as usize;
-
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        seg_data.as_ptr().add(src_offset),
-                        page_phys_virt.add(dst_offset),
-                        len,
-                    );
-                }
-            }
-
+            pt.map_to(
+                page,
+                frame,
+                PageTableFlags::PRESENT
+                    | PageTableFlags::USER_ACCESSIBLE
+                    | PageTableFlags::WRITABLE,
+                &mut KernelFrameAllocator,
+            )
+            .unwrap()
+            .flush();
         }
     }
 
     let order = pages_to_order(USER_STACK_PAGES_COUNT);
-
     let stack_bottom_phys = alloc_pages_by_order(order, PAllocFlags::KERNEL | PAllocFlags::ZEROED)
-        .expect("failed to allocate stack page");
+        .expect("make_init_task: stack OOM");
 
-    let stack_addr_top = USER_STACK_TOP_VIRT_ADDR;
-    let stack_size = PAGE_SIZE * USER_STACK_PAGES_COUNT;
-    let stack_addr_bottom = stack_addr_top - stack_size as u64;
+    let stack_size   = PAGE_SIZE * USER_STACK_PAGES_COUNT;
+    let stack_top_va = USER_STACK_TOP_VIRT_ADDR;
+    let stack_bot_va = stack_top_va - stack_size as u64;
 
-    let stack_bottom_page = Page::<Size4KiB>::containing_address(VirtAddr::new(stack_addr_bottom));
-    let stack_top_page = Page::<Size4KiB>::containing_address(VirtAddr::new(stack_addr_top - 1));
+    let stack_bot_page = Page::<Size4KiB>::containing_address(VirtAddr::new(stack_bot_va));
+    let stack_top_page = Page::<Size4KiB>::containing_address(VirtAddr::new(stack_top_va - 1));
 
-    let flags = PageTableFlags::PRESENT
-                | PageTableFlags::USER_ACCESSIBLE
-                | PageTableFlags::WRITABLE
-                | PageTableFlags::NO_EXECUTE;
+    let stack_flags = PageTableFlags::PRESENT
+        | PageTableFlags::USER_ACCESSIBLE
+        | PageTableFlags::WRITABLE
+        | PageTableFlags::NO_EXECUTE;
 
     let mut curr_phys = stack_bottom_phys.as_u64();
-    
-    for page in Page::range_inclusive(stack_bottom_page, stack_top_page) {
+    for page in Page::range_inclusive(stack_bot_page, stack_top_page) {
         let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(curr_phys));
         curr_phys += PAGE_SIZE as u64;
-
         unsafe {
-            pt.map_to(page, frame, flags, &mut KernelFrameAllocator)
+            pt.map_to(page, frame, stack_flags, &mut KernelFrameAllocator)
                 .unwrap()
                 .flush();
         }
     }
-    
-    let kernel_stack = allocate_kernel_stack(DEFAULT_KERNEL_STACK_SIZE);
 
-    let stack_top_ptr = kernel_stack.top.as_u64() as *mut u64;
-    
+    let bootinfo_phys = alloc_pages_by_order(0, PAllocFlags::KERNEL | PAllocFlags::ZEROED)
+        .expect("make_init_task: bootinfo OOM");
+
     unsafe {
-        stack_top_ptr.sub(1).write(stack_addr_top - 8);            
-        stack_top_ptr.sub(2).write(elf.entrypoint.as_u64());       
+        let dst = phys_to_virt(bootinfo_phys.as_u64() as usize) as *mut InitSvrsBootInfo;
+        core::ptr::write(dst, bootinfo);
+    }
 
-        stack_top_ptr.sub(3).write(user_task_trampoline as u64);   
+    let bootinfo_page = Page::<Size4KiB>::containing_address(VirtAddr::new(BOOTINFO_VADDR));
+    let bootinfo_frame = PhysFrame::<Size4KiB>::containing_address(bootinfo_phys);
 
+    unsafe {
+        pt.map_to(
+            bootinfo_page,
+            bootinfo_frame,
+            PageTableFlags::PRESENT
+                | PageTableFlags::USER_ACCESSIBLE,
+            &mut KernelFrameAllocator,
+        )
+        .unwrap()
+        .flush();
+    }
+
+    // kernel stack + trampoline
+    let kernel_stack = allocate_kernel_stack(DEFAULT_KERNEL_STACK_SIZE);
+    let stack_top_ptr = kernel_stack.top.as_u64() as *mut u64;
+
+    unsafe {
+        stack_top_ptr.sub(1).write(stack_top_va - 8);           // rsp
+        stack_top_ptr.sub(2).write(USER_ENTRY_VADDR);           // rip
+        stack_top_ptr.sub(3).write(user_task_trampoline as u64);// ret
         for i in 4..=18 {
-            stack_top_ptr.sub(i).write(0);                        
+            stack_top_ptr.sub(i).write(0);
         }
+        stack_top_ptr.sub(10).write(BOOTINFO_VADDR);            // rdi
     }
 
     let initial_rsp = unsafe { stack_top_ptr.sub(18) } as u64;
@@ -127,11 +140,13 @@ pub fn make_user_task(bytes: &[u8], task_id: TaskIdIndex) -> Result<Task, &'stat
         kernel_stack,
         registers: UnsafeCell::new(TaskRegisters {
             rsp: initial_rsp,
+            rdi: BOOTINFO_VADDR,
             ..Default::default()
         }),
-        addr_space: Mutex::new(AddrSpace::new(pt)),
-        task_state: AtomicU8::new(TaskState::Ready as u8),
-        wake_at_tick: Mutex::new(AtomicU64::new(0))
+        addr_space:   Mutex::new(AddrSpace::new(pt)),
+        task_state:   AtomicU8::new(TaskState::Ready as u8),
+        wake_at_tick: Mutex::new(AtomicU64::new(0)),
+        cnode:        Mutex::new(CNode::new()),
     })
 }
 
@@ -185,6 +200,7 @@ pub fn make_kernel_task(id: TaskId, entry_point: u64) -> Task {
         }),
         addr_space: Mutex::new(AddrSpace::new(page_table)),
         task_state: AtomicU8::new(TaskState::Ready as u8),
-        wake_at_tick: Mutex::new(AtomicU64::new(0))
+        wake_at_tick: Mutex::new(AtomicU64::new(0)),
+        cnode: Mutex::new(CNode::new())
     }
 }

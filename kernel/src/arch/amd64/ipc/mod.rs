@@ -12,6 +12,7 @@ use crate::{arch::amd64::{
 pub mod endpoint;
 pub mod message;
 pub mod notification;
+pub mod cnode;
 
 pub static IPC_MANAGER: Mutex<IpcManager> = Mutex::new(IpcManager::new());
 

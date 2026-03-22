@@ -1,150 +1,110 @@
-use crate::arch::amd64::{ipc::{IPC_MANAGER, IpcError, IpcResult, endpoint::EndpointId, message::{FastMessage, MsgLabel}}, scheduler::{awaken_task, block_current_on_ipc, syscall::IpcSyscallArguments, task::TaskRegisters, task_storage::get_task_by_index}};
+use crate::arch::amd64::{
+    ipc::{
+        IPC_MANAGER, IpcError, IpcResult, cnode::CapIdx, endpoint::EndpointId, message::{Capability, FastMessage, MsgLabel, OBJ_TYPE_ENDPOINT, ObjectId, Rights}
+    },
+    scheduler::{
+        awaken_task, block_current_on_ipc,
+        syscall::IpcSyscallArguments,
+        task::TaskRegisters,
+        task_storage::get_task_by_index,
+    },
+};
 
-pub (crate) enum IpcSyscallNumbers {
-    IpcSend = 0x60,
-    IpcRecv = 0x61,
-    IpcCall = 0x62,
-    IpcReply = 0x63,
-    IpcEpCreate = 0x64,
+pub(crate) enum IpcSyscallNumbers {
+    IpcSend      = 0x60,
+    IpcRecv      = 0x61,
+    IpcCall      = 0x62,
+    IpcReply     = 0x63,
+    IpcEpCreate  = 0x64,
     IpcEpDestroy = 0x65,
 }
 
-pub (crate) fn handle_ipc_ep_create(curr_task_id: u32) -> u64 {
-    let ep_id = IPC_MANAGER.lock().create_endpoint(curr_task_id).unwrap().0;
-    return ep_id;
+pub(crate) enum IpcSyscallRetCodes {
+    IpcOk              = 0,
+    IpcNotReady        = 17,
+    IpcInvalidEp       = 10,
+    IpcInvalidCap      = 11,
+    IpcPermissionDenied = 12,
+    IpcUnknown         = 32,
 }
 
-pub (crate) enum IpcSyscallRetCodes {
-    IpcOk = 0,
-    IpcNotReady = 17,
-    IpcInvalidEp = 10,
-    IpcUnknown = 32
-}
-
-pub (crate) fn handle_ipc_send(curr_task_id: u32, ipc: &IpcSyscallArguments) -> IpcSyscallRetCodes {
-    let msg = FastMessage::with_data(MsgLabel::NOTIFY, ipc.msg);
-
-    let result = {
-        let mut mgr = IPC_MANAGER.lock();
-        mgr.handle_send(curr_task_id, EndpointId::new(ipc.ep_id), msg)
-    };
-
-    match result {
-        IpcResult::WakeReceiver { receiver } => {
-            if let Some(task) = get_task_by_index(receiver) {
-                awaken_task(task);
-            }
-            return IpcSyscallRetCodes::IpcOk;
-        }
-
-        IpcResult::NotReady => {
-            return IpcSyscallRetCodes::IpcNotReady;
-        }
-
-        IpcResult::Error(err) => match err {
-            IpcError::InvalidEndpoint => return IpcSyscallRetCodes::IpcInvalidEp,
-            _ => return IpcSyscallRetCodes::IpcUnknown,
-        },
-
-        _ => return IpcSyscallRetCodes::IpcOk,
+fn resolve_endpoint_cap(
+    task_id: u32,
+    cap_idx: CapIdx,
+    required_rights: Rights,
+) -> Result<EndpointId, IpcSyscallRetCodes> {
+    let task = get_task_by_index(task_id)
+        .ok_or(IpcSyscallRetCodes::IpcInvalidCap)?;
+    let cnode = task.cnode.lock();
+    let cap = cnode.get(cap_idx)
+        .ok_or(IpcSyscallRetCodes::IpcInvalidCap)?;
+    if !cap.object.is_endpoint() {
+        return Err(IpcSyscallRetCodes::IpcInvalidCap);
     }
+    if !cap.rights.contains(required_rights) {
+        return Err(IpcSyscallRetCodes::IpcPermissionDenied);
+    }
+    Ok(EndpointId::new(cap.object.raw_id()))
 }
 
-pub (crate) fn handle_ipc_recv(curr_task_id: u32, sender: u64, curr_task_regs: &mut TaskRegisters) -> IpcSyscallRetCodes {
-    let result = IPC_MANAGER.lock().handle_recv(
-            curr_task_id,
-        EndpointId::new(sender),
+pub(crate) fn handle_ipc_ep_create(curr_task_id: u32) -> u64 {
+    let ep_id = IPC_MANAGER
+        .lock()
+        .create_endpoint(curr_task_id)
+        .unwrap()
+        .0;
+
+    let cap = Capability::new(
+        ObjectId::new(OBJ_TYPE_ENDPOINT, ep_id),
+        Rights::ALL,
     );
 
-    match result {
-        IpcResult::BlockCurrent => {
-            block_current_on_ipc();
+    let task = get_task_by_index(curr_task_id)
+        .expect("handle_ipc_ep_create: task not found");
+    let cap_idx = task.cnode.lock().alloc(cap)
+        .expect("handle_ipc_ep_create: CNode full");
 
-            let msg = IPC_MANAGER.lock().take_pending_message(curr_task_id);
-                    
-            if let Some(message) = msg {
-                curr_task_regs.rdi = message.label.0;
-                curr_task_regs.rsi = message.data[0];
-                curr_task_regs.rdx = message.data[1];
-                curr_task_regs.r10 = message.data[2];
-                curr_task_regs.r8  = message.data[3];
-            }
-            return IpcSyscallRetCodes::IpcOk;
-        }
-        IpcResult::Error(_) => return IpcSyscallRetCodes::IpcUnknown,
-        _ => return IpcSyscallRetCodes::IpcOk,
-    }
+    cap_idx as u64
 }
 
-pub (crate) fn handle_ipc_ep_destroy(curr_task_id: u32) -> IpcSyscallRetCodes {
-    IPC_MANAGER.lock().destroy_endpoint(EndpointId::new(curr_task_id as u64));
+pub(crate) fn handle_ipc_ep_destroy(
+    curr_task_id: u32,
+    cap_idx: u64,
+) -> IpcSyscallRetCodes {
+    let ep_id = match resolve_endpoint_cap(
+        curr_task_id,
+        cap_idx as CapIdx,
+        Rights::ALL,
+    ) {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+
+    IPC_MANAGER.lock().destroy_endpoint(ep_id);
+
+    // удаляем cap из CNode
+    let task = get_task_by_index(curr_task_id)
+        .expect("handle_ipc_ep_destroy: task not found");
+    task.cnode.lock().delete(cap_idx as CapIdx);
+
     IpcSyscallRetCodes::IpcOk
 }
 
-pub(crate) fn handle_ipc_call(
+pub(crate) fn handle_ipc_send(
     curr_task_id: u32,
     ipc: &IpcSyscallArguments,
-    curr_task_regs: &mut TaskRegisters,
 ) -> IpcSyscallRetCodes {
-    let server_ep = ipc.ep_id;
-    let reply_ep = ipc.msg[0];  
-    let msg_data = [ipc.msg[1], ipc.msg[2], ipc.msg[3], 0];
-
-    let msg = FastMessage::with_data(MsgLabel::CALL, msg_data);
-
-    let send_result = {
-        let mut mgr = IPC_MANAGER.lock();
-        mgr.handle_send(curr_task_id, EndpointId::new(server_ep), msg)
-    };
-
-    match send_result {
-        IpcResult::WakeReceiver { receiver } => {
-            if let Some(task) = get_task_by_index(receiver) {
-                awaken_task(task);
-            }
-        }
-        IpcResult::NotReady => return IpcSyscallRetCodes::IpcNotReady,
-        IpcResult::Error(err) => match err {
-            IpcError::InvalidEndpoint => return IpcSyscallRetCodes::IpcInvalidEp,
-            _ => return IpcSyscallRetCodes::IpcUnknown,
-        },
-        _ => {}
-    }
-
-    let recv_result = IPC_MANAGER.lock().handle_recv(
+    let ep_id = match resolve_endpoint_cap(
         curr_task_id,
-        EndpointId::new(reply_ep),
-    );
-
-    match recv_result {
-        IpcResult::BlockCurrent => {
-            block_current_on_ipc();
-
-            let msg = IPC_MANAGER.lock().take_pending_message(curr_task_id);
-            if let Some(message) = msg {
-                curr_task_regs.rdi = message.label.0;
-                curr_task_regs.rsi = message.data[0];
-                curr_task_regs.rdx = message.data[1];
-                curr_task_regs.r10 = message.data[2];
-                curr_task_regs.r8  = message.data[3];
-            }
-            return IpcSyscallRetCodes::IpcOk;
-        }
-        IpcResult::Error(_) => return IpcSyscallRetCodes::IpcUnknown,
-        _ => return IpcSyscallRetCodes::IpcOk,
-    }
-}
-
-pub(crate) fn handle_ipc_reply(
-    curr_task_id: u32,
-    ipc: &IpcSyscallArguments,
-) -> IpcSyscallRetCodes {
-    let msg = FastMessage::with_data(MsgLabel::REPLY_OK, ipc.msg);
-
-    let result = {
-        let mut mgr = IPC_MANAGER.lock();
-        mgr.handle_send(curr_task_id, EndpointId::new(ipc.ep_id), msg)
+        ipc.ep_id as CapIdx,
+        Rights::WRITE,
+    ) {
+        Ok(id) => id,
+        Err(e) => return e,
     };
+
+    let msg = FastMessage::with_data(MsgLabel::NOTIFY, ipc.msg);
+    let result = IPC_MANAGER.lock().handle_send(curr_task_id, ep_id, msg);
 
     match result {
         IpcResult::WakeReceiver { receiver } => {
@@ -154,10 +114,128 @@ pub(crate) fn handle_ipc_reply(
             IpcSyscallRetCodes::IpcOk
         }
         IpcResult::NotReady => IpcSyscallRetCodes::IpcNotReady,
-        IpcResult::Error(err) => match err {
-            IpcError::InvalidEndpoint => IpcSyscallRetCodes::IpcInvalidEp,
-            _ => IpcSyscallRetCodes::IpcUnknown,
-        },
+        IpcResult::Error(IpcError::InvalidEndpoint) => IpcSyscallRetCodes::IpcInvalidEp,
+        IpcResult::Error(_) => IpcSyscallRetCodes::IpcUnknown,
+        _ => IpcSyscallRetCodes::IpcOk,
+    }
+}
+
+pub(crate) fn handle_ipc_recv(
+    curr_task_id: u32,
+    cap_idx_raw: u64,
+    curr_task_regs: &mut TaskRegisters,
+) -> IpcSyscallRetCodes {
+    let ep_id = match resolve_endpoint_cap(
+        curr_task_id,
+        cap_idx_raw as CapIdx,
+        Rights::READ,
+    ) {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+
+    let result = IPC_MANAGER.lock().handle_recv(curr_task_id, ep_id);
+
+    match result {
+        IpcResult::BlockCurrent => {
+            block_current_on_ipc();
+            if let Some(msg) = IPC_MANAGER.lock().take_pending_message(curr_task_id) {
+                curr_task_regs.rdi = msg.label.0;
+                curr_task_regs.rsi = msg.data[0];
+                curr_task_regs.rdx = msg.data[1];
+                curr_task_regs.r10 = msg.data[2];
+                curr_task_regs.r8  = msg.data[3];
+            }
+            IpcSyscallRetCodes::IpcOk
+        }
+        IpcResult::Error(_) => IpcSyscallRetCodes::IpcUnknown,
+        _ => IpcSyscallRetCodes::IpcOk,
+    }
+}
+
+pub(crate) fn handle_ipc_call(
+    curr_task_id: u32,
+    ipc: &IpcSyscallArguments,
+    curr_task_regs: &mut TaskRegisters,
+) -> IpcSyscallRetCodes {
+    let server_ep = match resolve_endpoint_cap(
+        curr_task_id,
+        ipc.ep_id as CapIdx,
+        Rights::WRITE,
+    ) {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+
+    let reply_ep = match resolve_endpoint_cap(
+        curr_task_id,
+        ipc.msg[0] as CapIdx,
+        Rights::READ,
+    ) {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+
+    let msg_data = [ipc.msg[1], ipc.msg[2], ipc.msg[3], 0];
+    let msg = FastMessage::with_data(MsgLabel::CALL, msg_data);
+
+    let send_result = IPC_MANAGER.lock().handle_send(curr_task_id, server_ep, msg);
+    match send_result {
+        IpcResult::WakeReceiver { receiver } => {
+            if let Some(task) = get_task_by_index(receiver) {
+                awaken_task(task);
+            }
+        }
+        IpcResult::NotReady => return IpcSyscallRetCodes::IpcNotReady,
+        IpcResult::Error(IpcError::InvalidEndpoint) => return IpcSyscallRetCodes::IpcInvalidEp,
+        IpcResult::Error(_) => return IpcSyscallRetCodes::IpcUnknown,
+        _ => {}
+    }
+
+    let recv_result = IPC_MANAGER.lock().handle_recv(curr_task_id, reply_ep);
+    match recv_result {
+        IpcResult::BlockCurrent => {
+            block_current_on_ipc();
+            if let Some(msg) = IPC_MANAGER.lock().take_pending_message(curr_task_id) {
+                curr_task_regs.rdi = msg.label.0;
+                curr_task_regs.rsi = msg.data[0];
+                curr_task_regs.rdx = msg.data[1];
+                curr_task_regs.r10 = msg.data[2];
+                curr_task_regs.r8  = msg.data[3];
+            }
+            IpcSyscallRetCodes::IpcOk
+        }
+        IpcResult::Error(_) => IpcSyscallRetCodes::IpcUnknown,
+        _ => IpcSyscallRetCodes::IpcOk,
+    }
+}
+
+pub(crate) fn handle_ipc_reply(
+    curr_task_id: u32,
+    ipc: &IpcSyscallArguments,
+) -> IpcSyscallRetCodes {
+    let ep_id = match resolve_endpoint_cap(
+        curr_task_id,
+        ipc.ep_id as CapIdx,
+        Rights::WRITE,
+    ) {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+
+    let msg = FastMessage::with_data(MsgLabel::REPLY_OK, ipc.msg);
+    let result = IPC_MANAGER.lock().handle_send(curr_task_id, ep_id, msg);
+
+    match result {
+        IpcResult::WakeReceiver { receiver } => {
+            if let Some(task) = get_task_by_index(receiver) {
+                awaken_task(task);
+            }
+            IpcSyscallRetCodes::IpcOk
+        }
+        IpcResult::NotReady => IpcSyscallRetCodes::IpcNotReady,
+        IpcResult::Error(IpcError::InvalidEndpoint) => IpcSyscallRetCodes::IpcInvalidEp,
+        IpcResult::Error(_) => IpcSyscallRetCodes::IpcUnknown,
         _ => IpcSyscallRetCodes::IpcOk,
     }
 }

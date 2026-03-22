@@ -12,6 +12,7 @@ $(call USER_VARIABLE,KARCH,x86_64)
 $(call USER_VARIABLE,QEMUFLAGS,-m 4G)
 
 override IMAGE_NAME := template-$(KARCH)
+override INIT_SRVS := init_srvs.cpio
 
 .PHONY: all
 all: $(IMAGE_NAME).iso
@@ -170,14 +171,24 @@ limine/limine:
 	git clone https://github.com/limine-bootloader/limine.git --branch=v9.x-binary --depth=1
 	$(MAKE) -C limine
 
+.PHONY: init_srvs
+init_srvs:
+	@for dir in userland/*/; do \
+		echo "Building $$dir..."; \
+		$(MAKE) -C $$dir; \
+	done
+	@cd userland && find . -name "*.bin" | cpio -o -H newc > ../$(INIT_SRVS)
+	@echo "init_srvs built: $(INIT_SRVS)"
+
 .PHONY: kernel
 kernel:
 	$(MAKE) -C kernel
 
-$(IMAGE_NAME).iso: limine/limine kernel
+$(IMAGE_NAME).iso: limine/limine kernel init_srvs
 	rm -rf iso_root
 	mkdir -p iso_root/boot
 	cp -v kernel/kernel iso_root/boot/
+	cp -v $(INIT_SRVS) iso_root/boot/
 	mkdir -p iso_root/boot/limine
 	cp -v limine.conf iso_root/boot/limine/
 	mkdir -p iso_root/EFI/BOOT

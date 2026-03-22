@@ -1,3 +1,5 @@
+use acpi::aml::object::ObjectType;
+
 pub const MAX_CAPS_PER_MSG: usize = 4;
 
 pub const MSG_DATA_WORDS: usize = 4;
@@ -22,10 +24,33 @@ impl Rights {
     }
 }
 
+pub const OBJ_TYPE_SHIFT: u64 = 56;
+pub const OBJ_TYPE_TCB:      u64 = 1;
+pub const OBJ_TYPE_ENDPOINT: u64 = 2;
+pub const OBJ_TYPE_VSPACE:   u64 = 3;
+pub const OBJ_TYPE_UNTYPED:  u64 = 4;
+pub const OBJ_TYPE_CNODE:    u64 = 5;
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(transparent)]
 pub struct ObjectId(pub u64);
 
+impl ObjectId {
+    pub fn new(obj_type: u64, id: u64) -> Self {
+        ObjectId((obj_type << OBJ_TYPE_SHIFT) | (id & 0x00FF_FFFF_FFFF_FFFF))
+    }
+    
+    pub fn obj_type(&self) -> u64 {
+        self.0 >> OBJ_TYPE_SHIFT
+    }
+    
+    pub fn raw_id(&self) -> u64 {
+        self.0 & 0x00FF_FFFF_FFFF_FFFF
+    }
+    
+    pub fn is_tcb(&self) -> bool      { self.obj_type() == OBJ_TYPE_TCB }
+    pub fn is_endpoint(&self) -> bool { self.obj_type() == OBJ_TYPE_ENDPOINT }
+    pub fn is_vspace(&self) -> bool   { self.obj_type() == OBJ_TYPE_VSPACE }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(C)]

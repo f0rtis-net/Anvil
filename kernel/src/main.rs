@@ -4,8 +4,13 @@
 #![feature(abi_x86_interrupt)]
 
 
+use alloc::sync::Arc;
+
+use crate::arch::amd64::scheduler::exec_loader::{InitSvrsBootInfo, make_init_task};
+use crate::arch::amd64::scheduler::task_storage::add_task_to_execute;
 use crate::arch::{arch_init, hlt_loop};
 use crate::bootinfo::BootInfo;
+use crate::cpio_parser::cpio_find;
 use crate::early_print::fb_printer::ScrollingFbTextRenderer;
 use crate::framebuffer::Framebuffer;
 extern crate alloc;
@@ -18,6 +23,7 @@ mod framebuffer;
 mod early_print;
 mod bootinfo;
 mod misc;
+mod cpio_parser;
 
 include!(concat!(env!("OUT_DIR"), "/kernel_version.rs"));
 
@@ -36,7 +42,6 @@ pub fn print_hello_banner() {
     early_println!("=================================================");
     early_println!("");
 }
-
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
@@ -62,6 +67,26 @@ unsafe extern "C" fn kmain() -> ! {
 
     arch_init();
 
+    early_println!("Loading init service...");
+
+    let init_srvs = BootInfo::get_init_srvs().expect("No init pack of services found!");
+
+    let bootinfo = InitSvrsBootInfo {
+        self_tcb_cap:    0,
+        self_vspace_cap: 1,
+        self_cnode_cap:  2,
+    };
+
+    if let Some(data) = cpio_find(init_srvs, "server.bin") {
+        let init = make_init_task(data, 1, bootinfo).unwrap();
+        add_task_to_execute(Arc::new(init));
+        early_println!("Init service loaded!");
+    } else {
+        panic!("No init service found!");
+    }
+
+    early_println!("Post init arch...");
+    //todo - add bsp to smp
     hlt_loop();
 }
 

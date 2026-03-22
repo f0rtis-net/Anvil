@@ -1,9 +1,7 @@
 use core::{cell::UnsafeCell, ptr::NonNull, sync::atomic::{AtomicU8, AtomicU64, Ordering}};
 
 use spin::Mutex;
-use x86_64::PhysAddr;
-
-use crate::arch::amd64::{cpu::frames::InterruptFrame, scheduler::{addr_space::AddrSpace, stack::KernelStack}};
+use crate::arch::amd64::{cpu::frames::InterruptFrame, ipc::cnode::CNode, scheduler::{addr_space::AddrSpace, stack::KernelStack}};
 
 pub type TaskIdIndex = u32;
 pub type TaskGen = u32;
@@ -46,6 +44,7 @@ pub struct Task {
     pub addr_space: Mutex<AddrSpace>,
     pub task_state: AtomicU8,
     pub wake_at_tick: Mutex<AtomicU64>,
+    pub cnode: Mutex<CNode>
 }
 
 unsafe impl Sync for Task {}
