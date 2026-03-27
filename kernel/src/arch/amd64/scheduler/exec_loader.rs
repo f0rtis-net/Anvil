@@ -3,7 +3,7 @@ use core::{arch::naked_asm, cell::UnsafeCell, sync::atomic::{AtomicU8, AtomicU64
 use spin::Mutex;
 use x86_64::{PhysAddr, VirtAddr, instructions::interrupts, registers::control::Cr3, structures::paging::{Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB}};
 
-use crate::arch::amd64::{ipc::cnode::CNode, memory::{misc::{pages_to_order, phys_to_virt}, pmm::{HHDM_OFFSET, pages_allocator::{PAllocFlags, alloc_pages_by_order}}, vmm::{KernelFrameAllocator, PAGE_SIZE, create_new_pt4_from_kernel_pt4, kernel_pt}}, scheduler::{addr_space::AddrSpace, stack::{DEFAULT_KERNEL_STACK_SIZE, allocate_kernel_stack}, task::{Task, TaskId, TaskIdIndex, TaskRegisters, TaskState}}};
+use crate::arch::amd64::{ipc::{cnode::CNode, message::{Capability, OBJ_TYPE_CNODE, OBJ_TYPE_TCB, OBJ_TYPE_VSPACE, ObjectId, Rights}}, memory::{misc::{pages_to_order, phys_to_virt}, pmm::{HHDM_OFFSET, pages_allocator::{PAllocFlags, alloc_pages_by_order}}, vmm::{KernelFrameAllocator, PAGE_SIZE, create_new_pt4_from_kernel_pt4, kernel_pt}}, scheduler::{addr_space::AddrSpace, stack::{DEFAULT_KERNEL_STACK_SIZE, allocate_kernel_stack}, task::{Task, TaskId, TaskIdIndex, TaskRegisters, TaskState}}};
 
 const RFLAGS_WITH_IR: u64 = 0x202;
 const USER_STACK_PAGES_COUNT: usize = 4;
@@ -25,12 +25,26 @@ pub struct InitSvrsBootInfo {
     pub self_tcb_cap:    u64,
     pub self_vspace_cap: u64,
     pub self_cnode_cap:  u64,
+
+    cpio_base_addr: u64
+}
+
+pub fn make_init_caps(task_id: u64, cnode: &mut CNode) -> InitSvrsBootInfo {
+    let tcb_cap    = Capability::new(ObjectId::new(OBJ_TYPE_TCB,    task_id), Rights::ALL);
+    let vspace_cap = Capability::new(ObjectId::new(OBJ_TYPE_VSPACE, task_id), Rights::ALL);
+    let cnode_cap  = Capability::new(ObjectId::new(OBJ_TYPE_CNODE,  task_id), Rights::ALL);
+
+    let self_tcb_cap    = cnode.alloc(tcb_cap).expect("cnode full") as u64;
+    let self_vspace_cap = cnode.alloc(vspace_cap).expect("cnode full") as u64;
+    let self_cnode_cap  = cnode.alloc(cnode_cap).expect("cnode full") as u64;
+
+    InitSvrsBootInfo { self_tcb_cap, self_vspace_cap, self_cnode_cap, cpio_base_addr: 0 }
 }
 
 pub fn make_init_task(
     bytes: &[u8],
     task_id: TaskIdIndex,
-    bootinfo: InitSvrsBootInfo,
+    cpio_baddr: u64
 ) -> Result<Task, &'static str> {
     let new_pml4_phys = create_new_pt4_from_kernel_pt4();
     let mut pt = phys_to_offset_page_table(new_pml4_phys);
@@ -99,9 +113,13 @@ pub fn make_init_task(
     let bootinfo_phys = alloc_pages_by_order(0, PAllocFlags::KERNEL | PAllocFlags::ZEROED)
         .expect("make_init_task: bootinfo OOM");
 
+    let mut cnode = CNode::new();
+
+    let mut boot_info_svrs = make_init_caps(task_id as u64, &mut cnode);
+    boot_info_svrs.cpio_base_addr = cpio_baddr;
     unsafe {
         let dst = phys_to_virt(bootinfo_phys.as_u64() as usize) as *mut InitSvrsBootInfo;
-        core::ptr::write(dst, bootinfo);
+        core::ptr::write(dst, boot_info_svrs);
     }
 
     let bootinfo_page = Page::<Size4KiB>::containing_address(VirtAddr::new(BOOTINFO_VADDR));
@@ -146,7 +164,7 @@ pub fn make_init_task(
         addr_space:   Mutex::new(AddrSpace::new(pt)),
         task_state:   AtomicU8::new(TaskState::Ready as u8),
         wake_at_tick: Mutex::new(AtomicU64::new(0)),
-        cnode:        Mutex::new(CNode::new()),
+        cnode:        Mutex::new(cnode),
     })
 }
 

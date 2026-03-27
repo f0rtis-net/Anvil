@@ -80,7 +80,7 @@ define_per_cpu_struct!{
     }
 }
 
-pub fn init_scheduler_percpu() -> !{
+pub fn init_scheduler_percpu() -> ! {
     let cpu_id = CPU_NUM.fetch_add(1, Ordering::Relaxed) as usize;
 
     let descriptors = CPU_DESCRIPTORS.get().expect("CPU_DESCRIPTORS not initialized");
@@ -171,8 +171,7 @@ pub fn sleep(ns: u64) {
 fn wake_sleeping_tasks() {
     let my_id = PerCpuSchedulerData::get().cpu_id;
 
-    //todo, refactor to bsp, when exists
-    if my_id != 1 {
+    if my_id != 0 {
         return;
     }
 

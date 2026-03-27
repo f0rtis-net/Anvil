@@ -20,6 +20,10 @@ impl CNode {
     }
 
     pub fn get(&self, idx: CapIdx) -> Option<&Capability> {
+        if idx >= CAPABILITY_MAX as u32 {
+            return None;
+        }
+
         let cap = &self.slots[idx as usize];
         if cap.is_null() { None } else { Some(cap) }
     }

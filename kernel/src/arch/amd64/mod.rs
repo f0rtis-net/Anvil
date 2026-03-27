@@ -12,7 +12,7 @@ mod acpi;
 mod apic;
 mod timer;
 pub mod scheduler;
-mod ipc;
+pub mod ipc;
 
 fn early_startup() {
     instructions::interrupts::disable();

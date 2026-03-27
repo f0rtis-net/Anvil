@@ -119,6 +119,22 @@ pub fn install_ioapic_irq(irq_num: u8, vector_num: u8) {
         .with_destination_field(ioapic.ioapic_id().id()));
 }
 
+pub fn lapic_eoi() {
+    let gsbase: u64;
+    unsafe {
+        core::arch::asm!(
+            "rdgsbase {}", 
+            out(reg) gsbase,
+            options(nostack, nomem)
+        );
+    }
+    if gsbase != 0 {
+        PercpuLapic::with_guard(|p| p.lapic.eoi());
+    } else {
+        LAPIC.get().unwrap().eoi();
+    }
+}
+
 static KEYBOARD: Mutex<Option<Keyboard<layouts::Us104Key, ScancodeSet1>>> = Mutex::new(None);
 
 irq!(150, keyboard_irq, |stack| {
@@ -141,5 +157,5 @@ irq!(150, keyboard_irq, |stack| {
         }
     }
 
-    LAPIC.get().unwrap().eoi();
+    lapic_eoi();
 });

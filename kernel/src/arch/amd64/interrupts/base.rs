@@ -1,6 +1,6 @@
 use core::arch::asm;
 
-use crate::{arch::amd64::{cpu::{frames::InterruptFrame, hlt_loop}, interrupts::{idt::{IDT_COUNT, ISR_COUNT}, tables::{__irq_table_end, __irq_table_start, __isr_table_end, __isr_table_start, Handler, InterruptDescriptor}}}, early_println};
+use crate::{arch::amd64::{apic::lapic_eoi, cpu::{frames::InterruptFrame, hlt_loop}, interrupts::{idt::{IDT_COUNT, ISR_COUNT}, tables::{__irq_table_end, __irq_table_start, __isr_table_end, __isr_table_start, Handler, InterruptDescriptor}}}, early_println};
 
 static mut HANDLERS: [Option<Handler>; IDT_COUNT] = [None; IDT_COUNT];
 
@@ -41,6 +41,5 @@ extern "C" fn base_trap(stack_frame: *const InterruptFrame) {
     }
 
     early_println!("Unhandled irq interrupt!\n {}", frame);
-    hlt_loop();
-    //eoi(((frame.interrupt as usize) + ISR_COUNT) as u8);
+    lapic_eoi();
 }

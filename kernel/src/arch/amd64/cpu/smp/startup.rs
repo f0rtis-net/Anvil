@@ -90,18 +90,48 @@ unsafe extern "C" fn start_ap(info: &Cpu) -> ! {
 pub fn smp_startup() {
     let regions = init_percpu_regions();
     let regions: &'static [PerCpuRegion] = Box::leak(regions.into_boxed_slice());
-
     early_println!("All cpus count: {}", regions.len());
     global_init_scheduler(regions.len());
 
-    for (i, entry) in get_smp_entries().enumerate() {
-        entry.bootstrap_cpu(start_ap, &regions[i]);
+    let mp_response = BootInfo::get()
+        .get_smp_response()
+        .expect("failed to get limine SMP response");
+    let bsp_lapic_id = mp_response.bsp_lapic_id();
+
+    for entry in get_smp_entries() {
+        let i = mp_response
+            .cpus()
+            .iter()
+            .position(|c| c.lapic_id == entry.cpu.lapic_id)
+            .expect("CPU not found in mp_response");
+
+        if entry.cpu.lapic_id == bsp_lapic_id {
+            entry.bootstrap_bsp_cpu(start_ap, &regions[i]);
+        } else {
+            entry.bootstrap_cpu(start_ap, &regions[i]);
+        }
     }
 
     early_println!("Waiting for slave cpus...");
     while NUM_CPUS_BOOTSTRAPPED.load(Ordering::Acquire) < (regions.len() - 1) as u8 {
         core::hint::spin_loop();
     }
-
     early_println!("All slave cpus initialized!");
+}
+
+pub fn init_bsp_core_smp() -> ! {
+    let mp_response = BootInfo::get()
+        .get_smp_response()
+        .expect("failed to get limine SMP response");
+
+    let bsp_lapic_id = mp_response.bsp_lapic_id();
+    let bsp_cpu = mp_response
+        .cpus()
+        .iter()
+        .find(|c| c.lapic_id == bsp_lapic_id)
+        .expect("BSP CPU not found");
+
+    unsafe {
+        start_ap(bsp_cpu);
+    }   
 }

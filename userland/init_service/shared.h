@@ -185,16 +185,16 @@ static inline uint64_t alloc_frame() {
     return syscall0(SYS_ALLOC_FRAME);
 }
 
-static inline uint64_t vma_map(uint64_t vaddr, uint64_t size, uint64_t flags) {
-    return syscall3(SYS_VMA_MAP, vaddr, size, flags);
+static inline uint64_t vma_map(uint64_t vspace_cap_idx, uint64_t vaddr, uint64_t size, uint64_t flags) {
+    return syscall4(SYS_VMA_MAP, vspace_cap_idx, vaddr, size, flags);
 }
 
-static inline uint64_t vma_unmap(uint64_t vaddr) {
-    return syscall1(SYS_VMA_UNMAP, vaddr);
+static inline uint64_t vma_unmap(uint64_t vspace_cap_idx, uint64_t vaddr) {
+    return syscall2(SYS_VMA_UNMAP, vspace_cap_idx, vaddr);
 }
 
-static inline uint64_t mprotect(uint64_t vaddr, uint64_t flags) {
-    return syscall2(SYS_MPROTECT, vaddr, flags);
+static inline uint64_t mprotect(uint64_t vspace_cap_idx, uint64_t vaddr, uint64_t flags) {
+    return syscall3(SYS_MPROTECT, vspace_cap_idx, vaddr, flags);
 }
 
 static inline uint64_t sleep(uint64_t ns) {

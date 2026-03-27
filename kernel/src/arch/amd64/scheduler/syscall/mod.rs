@@ -8,6 +8,7 @@ use crate::{arch::amd64::{gdt::{USER_CODE_SELECTOR, USER_DATA_SELECTOR}, ipc::{I
 mod ipc_handlers;
 mod memory_handler;
 mod thread_handler;
+mod cap_check;
 
 struct IpcSyscallArguments {
     ep_id: u64,
@@ -73,11 +74,11 @@ fn syscall_dispatcher(registers: &mut TaskRegisters, args: &SyscallArguments) ->
 
         x if x == MemorySyscallNumbers::FrameAlloc as u64 => frame_alloc(),
 
-        x if x == MemorySyscallNumbers::VmaMap as u64 => vma_map(args.arg1, args.arg2, args.arg3 as u32),
+        x if x == MemorySyscallNumbers::VmaMap as u64 => vma_map(args.arg1, args.arg2, args.arg3, args.arg4 as u32),
 
-        x if x == MemorySyscallNumbers::VmaUnmap as u64 => vma_unmap(args.arg1),
+        x if x == MemorySyscallNumbers::VmaUnmap as u64 => vma_unmap(args.arg1, args.arg2),
 
-        x if x == MemorySyscallNumbers::Mprotect as u64 => mprotect(args.arg1, args.arg2 as u32),
+        x if x == MemorySyscallNumbers::Mprotect as u64 => mprotect(args.arg1, args.arg2, args.arg3 as u32),
         
         x if x == ThreadSyscallNums::ThreadSleep as u64 => thread_sleep(args.arg1),
 
