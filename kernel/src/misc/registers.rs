@@ -117,7 +117,7 @@ impl<T: Copy> RegisterROSideEffect<T> {
 }
 
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct RegisterWO<T> {
     address: usize,
     _phantom: PhantomData<*mut T>,

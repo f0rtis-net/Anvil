@@ -1,11 +1,11 @@
 use crate::arch::amd64::{
     ipc::{
-        IPC_MANAGER, IpcError, IpcResult, cnode::CapIdx, endpoint::EndpointId, message::{Capability, FastMessage, MsgLabel, OBJ_TYPE_ENDPOINT, ObjectId, Rights}
+        IPC_MANAGER, IpcError, IpcResult, cnode::CapIdx, endpoint::EndpointId, message::{Capability, FastMessage, MsgLabel, Rights}, object_table::{KernelObjType, KernelObject, ObjData, obj_insert, with_object}
     },
     scheduler::{
         awaken_task, block_current_on_ipc,
-        syscall::IpcSyscallArguments,
-        task::TaskRegisters,
+        syscall::{IpcSyscallArguments, cap_check::resolve_cap},
+        task::{Task, TaskRegisters},
         task_storage::get_task_by_index,
     },
 };
@@ -29,22 +29,21 @@ pub(crate) enum IpcSyscallRetCodes {
 }
 
 fn resolve_endpoint_cap(
-    task_id: u32,
+    task: &Task,
     cap_idx: CapIdx,
     required_rights: Rights,
 ) -> Result<EndpointId, IpcSyscallRetCodes> {
-    let task = get_task_by_index(task_id)
-        .ok_or(IpcSyscallRetCodes::IpcInvalidCap)?;
-    let cnode = task.tcb.cnode.lock();
-    let cap = cnode.get(cap_idx)
-        .ok_or(IpcSyscallRetCodes::IpcInvalidCap)?;
-    if !cap.object.is_endpoint() {
-        return Err(IpcSyscallRetCodes::IpcInvalidCap);
-    }
-    if !cap.rights.contains(required_rights) {
-        return Err(IpcSyscallRetCodes::IpcPermissionDenied);
-    }
-    Ok(EndpointId::new(cap.object.raw_id()))
+    let (handle, _) = resolve_cap(task, cap_idx as u64, KernelObjType::Endpoint, required_rights)
+        .map_err(|_| IpcSyscallRetCodes::IpcInvalidCap)?;
+
+    with_object(handle, |obj| {
+        match &obj.data {
+            ObjData::Endpoint(ep_id) => Some(EndpointId::new(*ep_id as u64)),
+            _ => None,
+        }
+    })
+    .flatten()
+    .ok_or(IpcSyscallRetCodes::IpcInvalidCap)
 }
 
 pub(crate) fn handle_ipc_ep_create(curr_task_id: u32) -> u64 {
@@ -54,10 +53,12 @@ pub(crate) fn handle_ipc_ep_create(curr_task_id: u32) -> u64 {
         .unwrap()
         .0;
 
-    let cap = Capability::new(
-        ObjectId::new(OBJ_TYPE_ENDPOINT, ep_id),
-        Rights::ALL,
-    );
+    let handle = obj_insert(KernelObject::new(
+        KernelObjType::Endpoint,
+        ObjData::Endpoint(ep_id as u32),
+    )).expect("object table full");
+
+    let cap = Capability::new(handle, Rights::ALL);
 
     let task = get_task_by_index(curr_task_id)
         .expect("handle_ipc_ep_create: task not found");
@@ -71,20 +72,26 @@ pub(crate) fn handle_ipc_ep_destroy(
     curr_task_id: u32,
     cap_idx: u64,
 ) -> IpcSyscallRetCodes {
-    let ep_id = match resolve_endpoint_cap(
-        curr_task_id,
-        cap_idx as CapIdx,
-        Rights::ALL,
-    ) {
+    let task = match get_task_by_index(curr_task_id) {
+        Some(t) => t,
+        None => return IpcSyscallRetCodes::IpcInvalidCap,
+    };
+
+    let ep_id = match resolve_endpoint_cap(&task, cap_idx as CapIdx, Rights::ALL) {
         Ok(id) => id,
         Err(e) => return e,
     };
 
-    IPC_MANAGER.lock().destroy_endpoint(ep_id);
+    let handle = {
+        let cnode = task.tcb.cnode.lock();
+        let cap = cnode.get(cap_idx as CapIdx).unwrap();
+        cap.handle
+    };
 
-    let task = get_task_by_index(curr_task_id)
-        .expect("handle_ipc_ep_destroy: task not found");
+    IPC_MANAGER.lock().destroy_endpoint(ep_id);
     task.tcb.cnode.lock().delete(cap_idx as CapIdx);
+
+    with_object(handle, |obj| obj.dec_ref());
 
     IpcSyscallRetCodes::IpcOk
 }
@@ -93,11 +100,12 @@ pub(crate) fn handle_ipc_send(
     curr_task_id: u32,
     ipc: &IpcSyscallArguments,
 ) -> IpcSyscallRetCodes {
-    let ep_id = match resolve_endpoint_cap(
-        curr_task_id,
-        ipc.ep_id as CapIdx,
-        Rights::WRITE,
-    ) {
+    let task = match get_task_by_index(curr_task_id) {
+        Some(t) => t,
+        None => return IpcSyscallRetCodes::IpcInvalidCap,
+    };
+
+    let ep_id = match resolve_endpoint_cap(&task, ipc.ep_id as CapIdx, Rights::WRITE) {
         Ok(id) => id,
         Err(e) => return e,
     };
@@ -124,11 +132,12 @@ pub(crate) fn handle_ipc_recv(
     cap_idx_raw: u64,
     curr_task_regs: &mut TaskRegisters,
 ) -> IpcSyscallRetCodes {
-    let ep_id = match resolve_endpoint_cap(
-        curr_task_id,
-        cap_idx_raw as CapIdx,
-        Rights::READ,
-    ) {
+    let task = match get_task_by_index(curr_task_id) {
+        Some(t) => t,
+        None => return IpcSyscallRetCodes::IpcInvalidCap,
+    };
+
+    let ep_id = match resolve_endpoint_cap(&task, cap_idx_raw as CapIdx, Rights::READ) {
         Ok(id) => id,
         Err(e) => return e,
     };
@@ -157,20 +166,17 @@ pub(crate) fn handle_ipc_call(
     ipc: &IpcSyscallArguments,
     curr_task_regs: &mut TaskRegisters,
 ) -> IpcSyscallRetCodes {
-    let server_ep = match resolve_endpoint_cap(
-        curr_task_id,
-        ipc.ep_id as CapIdx,
-        Rights::WRITE,
-    ) {
+    let task = match get_task_by_index(curr_task_id) {
+        Some(t) => t,
+        None => return IpcSyscallRetCodes::IpcInvalidCap,
+    };
+
+    let server_ep = match resolve_endpoint_cap(&task, ipc.ep_id as CapIdx, Rights::WRITE) {
         Ok(id) => id,
         Err(e) => return e,
     };
 
-    let reply_ep = match resolve_endpoint_cap(
-        curr_task_id,
-        ipc.msg[0] as CapIdx,
-        Rights::READ,
-    ) {
+    let reply_ep = match resolve_endpoint_cap(&task, ipc.msg[0] as CapIdx, Rights::READ) {
         Ok(id) => id,
         Err(e) => return e,
     };
@@ -213,11 +219,12 @@ pub(crate) fn handle_ipc_reply(
     curr_task_id: u32,
     ipc: &IpcSyscallArguments,
 ) -> IpcSyscallRetCodes {
-    let ep_id = match resolve_endpoint_cap(
-        curr_task_id,
-        ipc.ep_id as CapIdx,
-        Rights::WRITE,
-    ) {
+    let task = match get_task_by_index(curr_task_id) {
+        Some(t) => t,
+        None => return IpcSyscallRetCodes::IpcInvalidCap,
+    };
+
+    let ep_id = match resolve_endpoint_cap(&task, ipc.ep_id as CapIdx, Rights::WRITE) {
         Ok(id) => id,
         Err(e) => return e,
     };

@@ -3,7 +3,7 @@ use core::{arch::naked_asm, cell::UnsafeCell, sync::atomic::AtomicU64};
 use spin::Mutex;
 use x86_64::{PhysAddr, VirtAddr, instructions::interrupts, registers::control::Cr3, structures::paging::{Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB}};
 
-use crate::arch::amd64::{ipc::{cnode::CNode, message::{Capability, OBJ_TYPE_CNODE, OBJ_TYPE_TCB, OBJ_TYPE_VSPACE, ObjectId, Rights}}, memory::{misc::{pages_to_order, phys_to_virt}, pmm::{HHDM_OFFSET, pages_allocator::{PAllocFlags, alloc_pages_by_order}}, vmm::{KernelFrameAllocator, PAGE_SIZE, create_new_pt4_from_kernel_pt4, kernel_pt}}, scheduler::{addr_space::AddrSpace, stack::{DEFAULT_KERNEL_STACK_SIZE, allocate_kernel_stack}, task::{AtomicTaskState, Task, TaskId, TaskIdIndex, TaskRegisters, TaskState, Tcb}}};
+use crate::arch::amd64::{ipc::{cnode::CNode, message::{Capability, Rights}, object_table::{KernelObjType, KernelObject, ObjData, obj_insert}}, memory::{misc::{pages_to_order, phys_to_virt}, pmm::{HHDM_OFFSET, pages_allocator::{PAllocFlags, alloc_pages_by_order}}, vmm::{KernelFrameAllocator, PAGE_SIZE, create_new_pt4_from_kernel_pt4, kernel_pt}}, scheduler::{addr_space::AddrSpace, stack::{DEFAULT_KERNEL_STACK_SIZE, allocate_kernel_stack}, task::{AtomicTaskState, Task, TaskId, TaskIdIndex, TaskRegisters, TaskState, Tcb}}};
 
 const RFLAGS_WITH_IR: u64 = 0x202;
 const USER_STACK_PAGES_COUNT: usize = 4;
@@ -29,16 +29,36 @@ pub struct InitSvrsBootInfo {
     cpio_base_addr: u64
 }
 
-pub fn make_init_caps(task_id: u64, cnode: &mut CNode) -> InitSvrsBootInfo {
-    let tcb_cap    = Capability::new(ObjectId::new(OBJ_TYPE_TCB,    task_id), Rights::ALL);
-    let vspace_cap = Capability::new(ObjectId::new(OBJ_TYPE_VSPACE, task_id), Rights::ALL);
-    let cnode_cap  = Capability::new(ObjectId::new(OBJ_TYPE_CNODE,  task_id), Rights::ALL);
+pub fn make_init_caps(task_id: TaskIdIndex, cnode: &mut CNode) -> InitSvrsBootInfo {
+    let tcb_handle = obj_insert(KernelObject::new(
+        KernelObjType::Thread,
+        ObjData::Thread(task_id),
+    )).expect("object table full");
 
-    let self_tcb_cap    = cnode.alloc(tcb_cap).expect("cnode full") as u64;
+    let vspace_handle = obj_insert(KernelObject::new(
+        KernelObjType::VSpace,
+        ObjData::VSpace(task_id),
+    )).expect("object table full");
+
+    let cnode_handle = obj_insert(KernelObject::new(
+        KernelObjType::CNode,
+        ObjData::CNode(task_id),
+    )).expect("object table full");
+
+    let tcb_cap = Capability::new(tcb_handle, Rights::ALL);
+    let vspace_cap = Capability::new(vspace_handle, Rights::ALL);
+    let cnode_cap = Capability::new(cnode_handle, Rights::ALL);
+
+    let self_tcb_cap = cnode.alloc(tcb_cap).expect("cnode full") as u64;
     let self_vspace_cap = cnode.alloc(vspace_cap).expect("cnode full") as u64;
-    let self_cnode_cap  = cnode.alloc(cnode_cap).expect("cnode full") as u64;
+    let self_cnode_cap = cnode.alloc(cnode_cap).expect("cnode full") as u64;
 
-    InitSvrsBootInfo { self_tcb_cap, self_vspace_cap, self_cnode_cap, cpio_base_addr: 0 }
+    InitSvrsBootInfo {
+        self_tcb_cap,
+        self_vspace_cap,
+        self_cnode_cap,
+        cpio_base_addr: 0,
+    }
 }
 
 pub fn make_init_task(
@@ -115,7 +135,7 @@ pub fn make_init_task(
 
     let mut cnode = CNode::new();
 
-    let mut boot_info_svrs = make_init_caps(task_id as u64, &mut cnode);
+    let mut boot_info_svrs = make_init_caps(task_id, &mut cnode);
     boot_info_svrs.cpio_base_addr = cpio_baddr;
     unsafe {
         let dst = phys_to_virt(bootinfo_phys.as_u64() as usize) as *mut InitSvrsBootInfo;

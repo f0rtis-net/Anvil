@@ -1,4 +1,4 @@
-use acpi::aml::object::ObjectType;
+use crate::arch::amd64::ipc::object_table::{HandleRef, KernelObjType, with_object};
 
 pub const MAX_CAPS_PER_MSG: usize = 4;
 
@@ -24,57 +24,31 @@ impl Rights {
     }
 }
 
-pub const OBJ_TYPE_SHIFT: u64 = 56;
-pub const OBJ_TYPE_TCB:      u64 = 1;
-pub const OBJ_TYPE_ENDPOINT: u64 = 2;
-pub const OBJ_TYPE_VSPACE:   u64 = 3;
-pub const OBJ_TYPE_UNTYPED:  u64 = 4;
-pub const OBJ_TYPE_CNODE:    u64 = 5;
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ObjectId(pub u64);
-
-impl ObjectId {
-    pub fn new(obj_type: u64, id: u64) -> Self {
-        ObjectId((obj_type << OBJ_TYPE_SHIFT) | (id & 0x00FF_FFFF_FFFF_FFFF))
-    }
-    
-    pub fn obj_type(&self) -> u64 {
-        self.0 >> OBJ_TYPE_SHIFT
-    }
-    
-    pub fn raw_id(&self) -> u64 {
-        self.0 & 0x00FF_FFFF_FFFF_FFFF
-    }
-    
-    pub fn is_tcb(&self) -> bool      { self.obj_type() == OBJ_TYPE_TCB }
-    pub fn is_endpoint(&self) -> bool { self.obj_type() == OBJ_TYPE_ENDPOINT }
-    pub fn is_vspace(&self) -> bool   { self.obj_type() == OBJ_TYPE_VSPACE }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct Capability {
-    pub object: ObjectId,
+    pub handle: HandleRef,   
     pub rights: Rights,
     pub depth:  u32,
-    pub _pad:   u32,
 }
 
 impl Capability {
     pub const NULL: Capability = Capability {
-        object: ObjectId(0),
+        handle: HandleRef { index: 0, generation: 0 },
         rights: Rights::NONE,
-        depth:  0,
-        _pad:   0,
+        depth: 0,
     };
 
-    pub fn new(object: ObjectId, rights: Rights) -> Self {
-        Capability { object, rights, depth: 0, _pad: 0 }
+    pub fn new(handle: HandleRef, rights: Rights) -> Self {
+        Capability { handle, rights, depth: 0 }
     }
 
     pub fn is_null(&self) -> bool {
-        self.object.0 == 0
+        self.rights == Rights::NONE
+    }
+
+    pub fn obj_type(&self) -> Option<KernelObjType> {
+        with_object(self.handle, |obj| obj.obj_type)
     }
 
     pub fn derive(&self, requested: Rights) -> Option<Capability> {
@@ -83,10 +57,9 @@ impl Capability {
         }
         let child_rights = self.rights.intersect(requested);
         Some(Capability {
-            object: self.object,
+            handle: self.handle,
             rights: child_rights,
-            depth:  self.depth + 1,
-            _pad:   0,
+            depth: self.depth + 1,
         })
     }
 }

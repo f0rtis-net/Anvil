@@ -1,26 +1,6 @@
 use x86_64::{PhysAddr, VirtAddr, structures::paging::{Page, PageTableFlags, Size4KiB}};
 
-use crate::{arch::amd64::memory::vmm::{kmap_mmio_page}, irq};
-
-
-// LAPIC registers (offsets from base addr)
-const LAPIC_ID: u32 = 0x020;      // APIC ID
-const LAPIC_VER: u32 = 0x030;     // APIC Version
-const LAPIC_TPR: u32 = 0x080;     // Task Priority
-const LAPIC_EOI: u32 = 0x0B0;     // End Of Interrupt
-const LAPIC_SVR: u32 = 0x0F0;     // Spurious Interrupt Vector
-const LAPIC_ESR: u32 = 0x280;     // Error Status
-const LAPIC_ICR_LOW: u32 = 0x300; // Interrupt Command Low
-const LAPIC_ICR_HIGH: u32 = 0x310;// Interrupt Command High
-const LAPIC_TIMER: u32 = 0x320;   // LVT Timer
-const LAPIC_THERMAL: u32 = 0x330; // LVT Thermal
-const LAPIC_PERF: u32 = 0x340;    // LVT Performance
-const LAPIC_LINT0: u32 = 0x350;   // LVT LINT0
-const LAPIC_LINT1: u32 = 0x360;   // LVT LINT1
-const LAPIC_ERROR: u32 = 0x370;   // LVT Error
-const LAPIC_TIMER_INIT: u32 = 0x380;  // Timer Initial Count
-const LAPIC_TIMER_CURR: u32 = 0x390;  // Timer Current Count
-const LAPIC_TIMER_DIV: u32 = 0x3E0;   // Timer Divide Configuration
+use crate::{arch::amd64::memory::vmm::kmap_mmio_page, misc::registers::{RegisterRO, RegisterRW, RegisterWO}, register_struct};
 
 // flags for SVR (Spurious Interrupt Vector Register)
 const SVR_ENABLE: u32 = 0x100;    // Enable APIC
@@ -52,8 +32,30 @@ pub enum LapicTimerDivide {
     Div128 = 0b1010,
 }
 
+register_struct! {
+    LAPICRegisters {
+        0x020 => lapic_id: RegisterRO<u32>,
+        0x030 => lapic_ver: RegisterRO<u32>,
+        0x080 => lapic_tpr: RegisterRW<u32>,
+        0x0B0 => lapic_eoi: RegisterWO<u32>,
+        0x0F0 => lapic_svr: RegisterRW<u32>,
+        0x280 => lapic_esr: RegisterRW<u32>,
+        0x300 => lapic_icr_low: RegisterRW<u32>,
+        0x310 => lapic_icr_high: RegisterRW<u32>,
+        0x320 => lapic_timer: RegisterRW<u32>,
+        0x330 => lapic_thermal: RegisterRW<u32>,
+        0x340 => lapic_perf: RegisterRW<u32>,
+        0x350 => lapic_lint0: RegisterRW<u32>,
+        0x360 => lapic_lint1: RegisterRW<u32>,
+        0x370 => lapic_lvt_err: RegisterRW<u32>,
+        0x380 => lapic_timer_init: RegisterRW<u32>,
+        0x390 => lapic_timer_curr: RegisterRW<u32>,
+        0x3E0 => lapic_timer_div: RegisterRW<u32>,
+    }
+}
+
 pub struct Lapic {
-    base: *mut u32, 
+    registers: LAPICRegisters
 }
 
 unsafe impl Send for Lapic {}
@@ -69,45 +71,36 @@ impl Lapic {
             | PageTableFlags::NO_CACHE;
         
         kmap_mmio_page(aligned_virt_addr, phys_addr, flags);
-        
+        let registers = unsafe { LAPICRegisters::from_address(aligned_virt_addr.as_u64() as usize) };
+
         Self {
-            base: aligned_virt_addr.as_mut_ptr(),
+            registers
         }
     }
 }
 
 impl Lapic {
-    #[inline(always)]
-    pub fn write(&self, reg: u32, val: u32) {
-        unsafe { core::ptr::write_volatile(self.base.add((reg / 4) as usize), val) }
-    }
-
-    #[inline(always)]
-    pub fn read(&self, reg: u32) -> u32 {
-        unsafe { core::ptr::read_volatile(self.base.add((reg / 4) as usize)) }
-    }
-
     pub fn eoi(&self) {
-        self.write(LAPIC_EOI, 0);
+        self.registers.lapic_eoi().write(0);
     }
 
     pub fn id(&self) -> u32 {
-        self.read(LAPIC_ID) >> 24
+        self.registers.lapic_id().read() >> 24
     }
 
     pub fn enable(&self) {
-        let mut svr = self.read(LAPIC_SVR);
+        let mut svr = self.registers.lapic_svr().read();
 
         svr &= !0xFF;                    
         svr |= SPURIOUS_VECTOR;          
         svr |= SVR_ENABLE;               
 
-        self.write(LAPIC_SVR, svr);
-        self.read(LAPIC_SVR);
+        self.registers.lapic_svr().write(svr);
+        self.registers.lapic_svr().read();
     }
 
     pub fn set_task_priority(&self, priority: u32) {
-        self.write(LAPIC_TPR, priority);
+        self.registers.lapic_tpr().write(priority);
     }
 
     pub fn setup_timer_periodic(
@@ -122,11 +115,11 @@ impl Lapic {
     }
 
     pub fn stop_timer(&self) {
-        self.write(LAPIC_TIMER_INIT, 0);
+        self.registers.lapic_timer_init().write(0);
     }
 
     pub fn set_timer_divide(&self, div: LapicTimerDivide) {
-        self.write(LAPIC_TIMER_DIV, div as u32);
+        self.registers.lapic_timer_div().write(div as u32);
     }
 
     pub fn set_lvt_timer(&self, vector: u8, periodic: bool) {
@@ -136,18 +129,18 @@ impl Lapic {
             value |= 1 << 17; 
         }
 
-        self.write(LAPIC_TIMER, value);
+        self.registers.lapic_timer().write(value);
     }
 
     pub fn set_timer_initial(&self, count: u32) {
-        self.write(LAPIC_TIMER_INIT, count);
+        self.registers.lapic_timer_init().write(count);
     }
 
     pub fn read_timer_current(&self) -> u32 {
-        self.read(LAPIC_TIMER_CURR)
+        self.registers.lapic_timer_curr().read()
     }
 
     pub fn is_initialized(&self) -> bool {
-        !self.base.is_null()
+        self.registers.address != 0
     }
 }

@@ -1,4 +1,4 @@
-use crate::arch::amd64::{ipc::message::{Capability, Rights}, scheduler::task::Task};
+use crate::arch::amd64::{ipc::{message::{Capability, Rights}, object_table::{HandleRef, KernelObjType, with_object}}, scheduler::task::Task};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapError {
@@ -28,37 +28,24 @@ pub enum ExpectedOwner {
 pub fn resolve_cap(
     task: &Task,
     cap_idx: u64,
-    expected_type: u64,
-    expected_owner: ExpectedOwner,
+    expected_type: KernelObjType,
     required_rights: Rights,
-) -> Result<Capability, CapError> {
+) -> Result<(HandleRef, Rights), CapError> {
     let cnode = task.tcb.cnode.lock();
-
     let cap = cnode.get(cap_idx as u32)
-        .copied()
         .ok_or(CapError::InvalidIdx)?;
-
-    if cap.object.obj_type() != expected_type {
-        return Err(CapError::WrongType);
-    }
-
-    match expected_owner {
-        ExpectedOwner::CurrentTask => {
-            if cap.object.raw_id() != task.id.id() as u64 {
-                return Err(CapError::WrongOwner);
-            }
-        }
-        ExpectedOwner::Specific(id) => {
-            if cap.object.raw_id() != id {
-                return Err(CapError::WrongOwner);
-            }
-        }
-        ExpectedOwner::Any => {}
-    }
 
     if !cap.rights.contains(required_rights) {
         return Err(CapError::InsufficientRights);
     }
 
-    Ok(cap)
+    let valid = with_object(cap.handle, |obj| {
+        obj.obj_type == expected_type
+    }).unwrap_or(false);
+
+    if !valid {
+        return Err(CapError::WrongType);
+    }
+
+    Ok((cap.handle, cap.rights))
 }

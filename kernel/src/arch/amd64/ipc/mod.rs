@@ -13,6 +13,7 @@ pub mod endpoint;
 pub mod message;
 pub mod notification;
 pub mod cnode;
+pub mod object_table;
 
 pub static IPC_MANAGER: Mutex<IpcManager> = Mutex::new(IpcManager::new());
 
@@ -179,7 +180,7 @@ impl IpcManager {
     ) -> Result<(), IpcError> {
         for cap in msg.caps() {
             if cap.is_null() { continue; }
-            let owned = sender_caps.iter().find(|c| c.object == cap.object);
+            let owned = sender_caps.iter().find(|c| c.handle == cap.handle);
             match owned {
                 None => return Err(IpcError::NoPermission),
                 Some(owned_cap) => {
