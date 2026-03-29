@@ -22,7 +22,7 @@ pub(crate) fn vma_map(vspace_cap_idx: u64, vaddr: u64, size: u64, flags: u32) ->
     }
 
     let map_flags = MapFlags::from_bits_truncate(flags);
-    task.addr_space.lock()
+    task.tcb.addr_space.lock()
         .map(VirtAddr::new(vaddr), size as usize, VmaBacking::Reserved, map_flags)
         .unwrap();
 
@@ -38,7 +38,7 @@ pub (crate) fn vma_unmap(vspace_cap_idx: u64, vaddr: u64) -> u64 {
         return e.as_syscall_err();
     }
 
-    task.addr_space.lock().unmap(VirtAddr::new(vaddr)).unwrap();
+    task.tcb.addr_space.lock().unmap(VirtAddr::new(vaddr)).unwrap();
 
     0
 }
@@ -54,7 +54,7 @@ pub (crate) fn mprotect(vspace_cap_idx: u64, vaddr: u64, flags: u32) -> u64 {
 
     let map_flags = MapFlags::from_bits_truncate(flags);
 
-    task.addr_space.lock().protect(VirtAddr::new(vaddr), map_flags).unwrap();
+    task.tcb.addr_space.lock().protect(VirtAddr::new(vaddr), map_flags).unwrap();
 
     0
 }

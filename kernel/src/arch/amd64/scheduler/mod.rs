@@ -44,7 +44,7 @@ impl CpuDescriptorStorage {
 
     pub fn try_to_steal_into(&self, me: usize, buf: &mut [Option<Arc<Task>>]) -> usize {
         let mut count = 0;
-        let steal_batch = 2;
+        let steal_batch = 1; // FIX!!!!
 
         for (idx, cpu_cell) in self.cpus.iter().enumerate() {
             if idx == me { continue; }
@@ -99,7 +99,7 @@ pub fn init_scheduler_percpu() -> ! {
     let my_desc = descriptors.cpu(cpu_id);
     let dummy_rsp: u64 = 0;
     let idle_rsp = unsafe { (*my_desc.idle_task.registers.get()).rsp };
-    let idle_cr3 = my_desc.idle_task.addr_space.lock().get_page_table_phys();
+    let idle_cr3 = my_desc.idle_task.tcb.addr_space.lock().get_page_table_phys();
 
     unsafe {
         switch_to_task(
@@ -126,14 +126,14 @@ pub fn block_current_on_ipc() {
     }
 
     unsafe {
-        (*curr_ptr).set_state(TaskState::Sleep);
+        (*curr_ptr).tcb.task_state.store(TaskState::Sleep, Ordering::Relaxed);
         let task_rsp_ptr = addr_of!((*(*curr_ptr).registers.get()).rsp);
 
         my_desc.set_curr_task(core::ptr::null_mut());
         PerCpuSchedulerData::get_mut().curr_task_id = my_desc.idle_task.id;
 
         let idle_rsp = (*my_desc.idle_task.registers.get()).rsp;
-        let idle_cr3 = my_desc.idle_task.addr_space.lock().get_page_table_phys();
+        let idle_cr3 = my_desc.idle_task.tcb.addr_space.lock().get_page_table_phys();
 
         switch_to_task(task_rsp_ptr, idle_rsp, idle_cr3.as_u64());
     }
@@ -154,15 +154,15 @@ pub fn sleep(ns: u64) {
     let wake_at = current_tick + ticks;
 
     unsafe { 
-        (*curr_ptr).wake_at_tick.lock().store(wake_at, Ordering::Relaxed); 
-        (*curr_ptr).set_state(TaskState::Sleep);
+        (*curr_ptr).tcb.wake_at_tick.lock().store(wake_at, Ordering::Relaxed); 
+        (*curr_ptr).tcb.task_state.store(TaskState::Sleep, Ordering::Release);
 
         let task_rsp_ptr = addr_of!((*(*curr_ptr).registers.get()).rsp);
         my_desc.set_curr_task(core::ptr::null_mut());
         PerCpuSchedulerData::get_mut().curr_task_id = my_desc.idle_task.id;
 
         let idle_rsp = (*my_desc.idle_task.registers.get()).rsp;
-        let idle_cr3 = my_desc.idle_task.addr_space.lock().get_page_table_phys();
+        let idle_cr3 = my_desc.idle_task.tcb.addr_space.lock().get_page_table_phys();
 
         switch_to_task(task_rsp_ptr, idle_rsp, idle_cr3.as_u64());
     }
@@ -181,10 +181,10 @@ fn wake_sleeping_tasks() {
         let tasks = table().tasks.lock();
         tasks.values()
             .filter(|t| {
-                if !matches!(t.get_state(), TaskState::Sleep) {
+                if !matches!(t.tcb.task_state.load(Ordering::Acquire), TaskState::Sleep) {
                     return false;
                 }
-                let wake_at = t.wake_at_tick.lock().load(Ordering::Acquire);
+                let wake_at = t.tcb.wake_at_tick.lock().load(Ordering::Acquire);
                 wake_at != 0 && now >= wake_at
             })
             .map(|t| t.id.id())
@@ -193,15 +193,16 @@ fn wake_sleeping_tasks() {
 
     for idx in to_wake {
         if let Some(task) = get_task_by_index(idx) {
-            task.wake_at_tick.lock().store(0, Ordering::Release);
-            task.set_state(TaskState::Ready);
+            task.tcb.wake_at_tick.lock().store(0, Ordering::Release);
+            
+            task.tcb.task_state.store(TaskState::Ready, Ordering::Release);
             awaken_task(task);
         }
     }
 }
 
 pub fn awaken_task(task: Arc<Task>) {
-    task.set_state(TaskState::Ready);
+    task.tcb.task_state.store(TaskState::Ready, Ordering::Release);
     add_task_to_execute(task);
 }
 
@@ -269,14 +270,14 @@ fn process_tick() {
         (true, Some(next)) => {
             let next_ptr = Arc::into_raw(next) as *mut Task;
             unsafe {
-                (*next_ptr).set_state(TaskState::Running);
+                (*next_ptr).tcb.task_state.store(TaskState::Running, Ordering::Release);
                 my_desc.set_curr_task(next_ptr);
                 PerCpuSchedulerData::get_mut().curr_task_id = (*next_ptr).id;
-                set_per_cpu_TOP_OF_KERNEL_STACK((*next_ptr).kernel_stack.top.as_u64());
-                set_tss_rsp0(VirtAddr::new((*next_ptr).kernel_stack.top.as_u64()));
+                set_per_cpu_TOP_OF_KERNEL_STACK((*next_ptr).tcb.kernel_stack.top.as_u64());
+                set_tss_rsp0(VirtAddr::new((*next_ptr).tcb.kernel_stack.top.as_u64()));
                 let idle_rsp_ptr = addr_of!((*my_desc.idle_task.registers.get()).rsp);
                 let next_rsp = (*(*next_ptr).registers.get()).rsp;
-                let next_cr3 = (*next_ptr).addr_space.lock().get_page_table_phys();
+                let next_cr3 = (*next_ptr).tcb.addr_space.lock().get_page_table_phys();
 
                 switch_to_task(idle_rsp_ptr, next_rsp, next_cr3.as_u64());
             }
@@ -286,18 +287,18 @@ fn process_tick() {
             let next_ptr = Arc::into_raw(next) as *mut Task;
             unsafe {
                 let task_rsp_ptr = addr_of!((*(*curr_ptr).registers.get()).rsp);
-                (*curr_ptr).set_state(TaskState::Ready);
+                (*curr_ptr).tcb.task_state.store(TaskState::Ready, Ordering::Release);
                 let curr_arc = Arc::from_raw(curr_ptr);
                 my_desc.tasks.push(curr_arc);
 
-                (*next_ptr).set_state(TaskState::Running);
+                (*next_ptr).tcb.task_state.store(TaskState::Running, Ordering::Release);
                 my_desc.set_curr_task(next_ptr);
                 PerCpuSchedulerData::get_mut().curr_task_id = (*next_ptr).id;
-                set_per_cpu_TOP_OF_KERNEL_STACK((*next_ptr).kernel_stack.top.as_u64());
-                set_tss_rsp0(VirtAddr::new((*next_ptr).kernel_stack.top.as_u64()));
+                set_per_cpu_TOP_OF_KERNEL_STACK((*next_ptr).tcb.kernel_stack.top.as_u64());
+                set_tss_rsp0(VirtAddr::new((*next_ptr).tcb.kernel_stack.top.as_u64()));
 
                 let next_rsp = (*(*next_ptr).registers.get()).rsp;
-                let next_cr3 = (*next_ptr).addr_space.lock().get_page_table_phys();
+                let next_cr3 = (*next_ptr).tcb.addr_space.lock().get_page_table_phys();
 
                 switch_to_task(task_rsp_ptr, next_rsp, next_cr3.as_u64());
             }

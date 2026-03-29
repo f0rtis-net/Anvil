@@ -200,7 +200,7 @@ impl Drop for AddrSpace {
                 let va = VirtAddr::new(vma.vaddr.as_u64() + (i * PAGE_SIZE) as u64);
                 
                 match &vma.backing {
-                    VmaBacking::Physical { phys_addr } => {
+                    VmaBacking::Physical { .. } => {
                         if let Ok(pa) = unmap_single_page(&mut self.page_table, va) {
                             free_pages(pa);
                         }

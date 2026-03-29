@@ -1,4 +1,4 @@
-use x86_64::{VirtAddr, registers::control::{Cr2, Cr3}};
+use x86_64::{VirtAddr, registers::control::Cr2};
 
 use crate::{arch::amd64::{cpu::hlt_loop, memory::{pmm::pages_allocator::{PAllocFlags, alloc_pages_by_order}, vmm::{PAGE_SIZE, map_single_page}}, scheduler::{PerCpuSchedulerData, addr_space::{MapFlags, VmaBacking}, task_storage::get_task_by_index}}, early_println, isr};
 
@@ -19,7 +19,7 @@ isr!(14, page_fault, |frame| {
 
     let curr_task_id = PerCpuSchedulerData::get().curr_task_id.id();
     let task = get_task_by_index(curr_task_id).unwrap();
-    let mut addr_space = task.addr_space.lock();
+    let mut addr_space = task.tcb.addr_space.lock();
 
     match addr_space.find(fault_addr) {
         Some(vma) => {

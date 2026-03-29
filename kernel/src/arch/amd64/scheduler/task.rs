@@ -1,35 +1,28 @@
-use core::{cell::UnsafeCell, ptr::NonNull, sync::atomic::{AtomicU8, AtomicU64, Ordering}};
+use core::{cell::UnsafeCell, sync::atomic::AtomicU64};
 
+use atomic_enum::atomic_enum;
 use spin::Mutex;
-use crate::arch::amd64::{cpu::frames::InterruptFrame, ipc::cnode::CNode, scheduler::{addr_space::AddrSpace, stack::KernelStack}};
+use crate::arch::amd64::{ipc::cnode::CNode, scheduler::{addr_space::AddrSpace, stack::KernelStack}};
 
 pub type TaskIdIndex = u32;
-pub type TaskGen = u32;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub struct TaskId {
     index: TaskIdIndex,
-    generation: TaskGen
 }
 
 impl TaskId {
     pub fn new(index: TaskIdIndex) -> Self {
-        Self { index, generation: 0 }
-    }
-
-    pub fn new_full(index: TaskIdIndex, generation: TaskGen) -> Self {
-        Self { index, generation }
+        Self { index }
     }
 
     pub fn id(&self) -> TaskIdIndex {
         self.index
     }
-
-    pub fn generation(&self) -> TaskGen {
-        self.generation
-    }
 }
 
+#[atomic_enum]
+#[repr(u8)]
 pub enum TaskState {
     Running = 0,
     Ready = 1,
@@ -39,31 +32,19 @@ pub enum TaskState {
 
 pub struct Task {
     pub id: TaskId,
-    pub kernel_stack: KernelStack,
     pub registers: UnsafeCell<TaskRegisters>,
-    pub addr_space: Mutex<AddrSpace>,
-    pub task_state: AtomicU8,
+    pub tcb: Tcb
+}
+
+pub struct Tcb {
     pub wake_at_tick: Mutex<AtomicU64>,
-    pub cnode: Mutex<CNode>
+    pub addr_space: Mutex<AddrSpace>,
+    pub kernel_stack: KernelStack,
+    pub cnode: Mutex<CNode>,
+    pub task_state: AtomicTaskState,
 }
 
 unsafe impl Sync for Task {}
-
-impl Task {
-    pub fn set_state(&self, state: TaskState) {
-        self.task_state.store(state as u8, Ordering::Release);
-    }
-
-    pub fn get_state(&self) -> TaskState {
-        match self.task_state.load(Ordering::Acquire) {
-            0 => TaskState::Running,
-            1 => TaskState::Ready,
-            2 => TaskState::Exiting,
-            3 => TaskState::Sleep,
-            _ => panic!("invalid task state"),
-        }
-    }
-}
 
 #[derive(Debug, Default)]
 #[repr(packed)]

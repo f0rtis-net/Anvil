@@ -35,7 +35,7 @@ fn resolve_endpoint_cap(
 ) -> Result<EndpointId, IpcSyscallRetCodes> {
     let task = get_task_by_index(task_id)
         .ok_or(IpcSyscallRetCodes::IpcInvalidCap)?;
-    let cnode = task.cnode.lock();
+    let cnode = task.tcb.cnode.lock();
     let cap = cnode.get(cap_idx)
         .ok_or(IpcSyscallRetCodes::IpcInvalidCap)?;
     if !cap.object.is_endpoint() {
@@ -61,7 +61,7 @@ pub(crate) fn handle_ipc_ep_create(curr_task_id: u32) -> u64 {
 
     let task = get_task_by_index(curr_task_id)
         .expect("handle_ipc_ep_create: task not found");
-    let cap_idx = task.cnode.lock().alloc(cap)
+    let cap_idx = task.tcb.cnode.lock().alloc(cap)
         .expect("handle_ipc_ep_create: CNode full");
 
     cap_idx as u64
@@ -82,10 +82,9 @@ pub(crate) fn handle_ipc_ep_destroy(
 
     IPC_MANAGER.lock().destroy_endpoint(ep_id);
 
-    // удаляем cap из CNode
     let task = get_task_by_index(curr_task_id)
         .expect("handle_ipc_ep_destroy: task not found");
-    task.cnode.lock().delete(cap_idx as CapIdx);
+    task.tcb.cnode.lock().delete(cap_idx as CapIdx);
 
     IpcSyscallRetCodes::IpcOk
 }

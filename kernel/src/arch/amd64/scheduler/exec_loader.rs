@@ -1,9 +1,9 @@
-use core::{arch::naked_asm, cell::UnsafeCell, sync::atomic::{AtomicU8, AtomicU64}};
+use core::{arch::naked_asm, cell::UnsafeCell, sync::atomic::AtomicU64};
 
 use spin::Mutex;
 use x86_64::{PhysAddr, VirtAddr, instructions::interrupts, registers::control::Cr3, structures::paging::{Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB}};
 
-use crate::arch::amd64::{ipc::{cnode::CNode, message::{Capability, OBJ_TYPE_CNODE, OBJ_TYPE_TCB, OBJ_TYPE_VSPACE, ObjectId, Rights}}, memory::{misc::{pages_to_order, phys_to_virt}, pmm::{HHDM_OFFSET, pages_allocator::{PAllocFlags, alloc_pages_by_order}}, vmm::{KernelFrameAllocator, PAGE_SIZE, create_new_pt4_from_kernel_pt4, kernel_pt}}, scheduler::{addr_space::AddrSpace, stack::{DEFAULT_KERNEL_STACK_SIZE, allocate_kernel_stack}, task::{Task, TaskId, TaskIdIndex, TaskRegisters, TaskState}}};
+use crate::arch::amd64::{ipc::{cnode::CNode, message::{Capability, OBJ_TYPE_CNODE, OBJ_TYPE_TCB, OBJ_TYPE_VSPACE, ObjectId, Rights}}, memory::{misc::{pages_to_order, phys_to_virt}, pmm::{HHDM_OFFSET, pages_allocator::{PAllocFlags, alloc_pages_by_order}}, vmm::{KernelFrameAllocator, PAGE_SIZE, create_new_pt4_from_kernel_pt4, kernel_pt}}, scheduler::{addr_space::AddrSpace, stack::{DEFAULT_KERNEL_STACK_SIZE, allocate_kernel_stack}, task::{AtomicTaskState, Task, TaskId, TaskIdIndex, TaskRegisters, TaskState, Tcb}}};
 
 const RFLAGS_WITH_IR: u64 = 0x202;
 const USER_STACK_PAGES_COUNT: usize = 4;
@@ -155,16 +155,18 @@ pub fn make_init_task(
 
     Ok(Task {
         id: TaskId::new(task_id),
-        kernel_stack,
         registers: UnsafeCell::new(TaskRegisters {
             rsp: initial_rsp,
             rdi: BOOTINFO_VADDR,
             ..Default::default()
         }),
-        addr_space:   Mutex::new(AddrSpace::new(pt)),
-        task_state:   AtomicU8::new(TaskState::Ready as u8),
-        wake_at_tick: Mutex::new(AtomicU64::new(0)),
-        cnode:        Mutex::new(cnode),
+        tcb: Tcb {
+            wake_at_tick: Mutex::new(AtomicU64::new(0)),
+            addr_space: Mutex::new(AddrSpace::new(pt)),
+            kernel_stack,
+            cnode: Mutex::new(cnode),
+            task_state: AtomicTaskState::new(TaskState::Ready)
+        },
     })
 }
 
@@ -211,14 +213,16 @@ pub fn make_kernel_task(id: TaskId, entry_point: u64) -> Task {
 
     Task {
         id,
-        kernel_stack,
         registers: UnsafeCell::new(TaskRegisters {
             rsp: initial_rsp,
             ..TaskRegisters::default()
         }),
-        addr_space: Mutex::new(AddrSpace::new(page_table)),
-        task_state: AtomicU8::new(TaskState::Ready as u8),
-        wake_at_tick: Mutex::new(AtomicU64::new(0)),
-        cnode: Mutex::new(CNode::new())
+        tcb: Tcb { 
+            wake_at_tick: Mutex::new(AtomicU64::new(0)), 
+            addr_space: Mutex::new(AddrSpace::new(page_table)), 
+            kernel_stack, 
+            cnode: Mutex::new(CNode::new()), 
+            task_state: AtomicTaskState::new(TaskState::Ready)
+        }
     }
 }

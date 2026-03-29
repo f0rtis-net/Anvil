@@ -1,9 +1,9 @@
 use core::arch::naked_asm;
 
 use spin::Mutex;
-use x86_64::{VirtAddr, registers::{control::{Efer, EferFlags}, model_specific::{LStar, SFMask}, rflags::RFlags}, structures::paging::frame};
+use x86_64::{VirtAddr, registers::{control::{Efer, EferFlags}, model_specific::{LStar, SFMask}, rflags::RFlags}};
 
-use crate::{arch::amd64::{gdt::{USER_CODE_SELECTOR, USER_DATA_SELECTOR}, ipc::{IpcError, IpcResult, endpoint::EndpointId, message::{FastMessage, MsgLabel}}, scheduler::{PerCpuSchedulerData, syscall::{ipc_handlers::{IpcSyscallNumbers, handle_ipc_call, handle_ipc_ep_create, handle_ipc_ep_destroy, handle_ipc_recv, handle_ipc_reply, handle_ipc_send}, memory_handler::{MemorySyscallNumbers, frame_alloc, mprotect, vma_map, vma_unmap}, thread_handler::{ThreadSyscallNums, thread_sleep}}, task::TaskRegisters, task_storage::get_task_by_index}}, define_per_cpu_u64, early_print, early_println};
+use crate::{arch::amd64::{gdt::{USER_CODE_SELECTOR, USER_DATA_SELECTOR}, ipc::{message::{FastMessage, MsgLabel}}, scheduler::{PerCpuSchedulerData, syscall::{ipc_handlers::{IpcSyscallNumbers, handle_ipc_call, handle_ipc_ep_create, handle_ipc_ep_destroy, handle_ipc_recv, handle_ipc_reply, handle_ipc_send}, memory_handler::{MemorySyscallNumbers, frame_alloc, mprotect, vma_map, vma_unmap}, thread_handler::{ThreadSyscallNums, thread_sleep}}, task::TaskRegisters}}, define_per_cpu_u64, early_print, early_println};
 
 mod ipc_handlers;
 mod memory_handler;

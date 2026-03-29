@@ -32,7 +32,7 @@ pub fn resolve_cap(
     expected_owner: ExpectedOwner,
     required_rights: Rights,
 ) -> Result<Capability, CapError> {
-    let cnode = task.cnode.lock();
+    let cnode = task.tcb.cnode.lock();
 
     let cap = cnode.get(cap_idx as u32)
         .copied()
